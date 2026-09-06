@@ -65,6 +65,7 @@ final class TLLayer: Identifiable, ObservableObject {
     @Published var expanded: Bool = true
     @Published var frames: [FrameMark]
     @Published var frameScripts: [Int: String] = [:]   // 1-based frame number -> JS/TS source
+    @Published var textFrames: [Int: PlacedText] = [:] // 1-based keyframe number -> placed text
 
     func isKeyframe(at frame: Int) -> Bool {
         let idx = frame - 1
@@ -75,8 +76,25 @@ final class TLLayer: Identifiable, ObservableObject {
         }
     }
 
+    /// The keyframe that governs `frame` on this layer — walking back over
+    /// `.plain`/`.tween` span-continuation marks to the `.keyframe`/
+    /// `.emptyKeyframe` that started the span. nil if `frame` isn't inside
+    /// any span (e.g. still `.empty`).
+    func governingKeyframe(at frame: Int) -> Int? {
+        var i = frame - 1
+        while i >= 0 && frames.indices.contains(i) {
+            switch frames[i] {
+            case .keyframe, .emptyKeyframe: return i + 1
+            case .plain, .tween: i -= 1
+            default: return nil
+            }
+        }
+        return nil
+    }
+
     init(name: String, swatch: Color, kind: LayerKind = .normal, indent: Int = 0,
-         locked: Bool = false, hidden: Bool = false, frames: [FrameMark]) {
+         locked: Bool = false, hidden: Bool = false, frames: [FrameMark],
+         textFrames: [Int: PlacedText] = [:]) {
         self.name = name
         self.swatch = swatch
         self.kind = kind
@@ -84,6 +102,7 @@ final class TLLayer: Identifiable, ObservableObject {
         self.locked = locked
         self.hidden = hidden
         self.frames = frames
+        self.textFrames = textFrames
     }
 }
 
@@ -128,6 +147,46 @@ final class TimelineDocument: ObservableObject {
 
     @Published var stageObjects: [StageObject] = []
     private var activeTweens: [ActiveTween] = []
+
+    // MARK: - Text tool
+
+    enum StageTool { case selection, text }
+    struct TextPlacementRef: Equatable { let layerID: UUID; let keyframe: Int }
+
+    @Published var selectedTool: StageTool = .selection
+    @Published var selectedPlacement: TextPlacementRef?
+
+    /// Places a new default text box on `selectedLayer` at the keyframe that
+    /// governs `selectedFrame`, and selects it. Mirrors the Actions panel's
+    /// own rule (see CodeEditorPanel) that content only attaches to an
+    /// actual keyframe — if there isn't one yet, this just logs a hint
+    /// instead of silently inventing one.
+    func placeText(at point: CGPoint) {
+        guard let layer = selectedLayer else { return }
+        guard let kf = layer.governingKeyframe(at: selectedFrame) else {
+            logToConsole("Select or insert a keyframe on \"\(layer.name)\" before placing text.", level: .warn)
+            return
+        }
+        let placement = PlacedText(x: point.x, y: point.y)
+        layer.textFrames[kf] = placement
+        selectedPlacement = TextPlacementRef(layerID: layer.id, keyframe: kf)
+    }
+
+    func deleteSelectedPlacement() {
+        guard let ref = selectedPlacement, let layer = layers.first(where: { $0.id == ref.layerID }) else { return }
+        layer.textFrames[ref.keyframe] = nil
+        selectedPlacement = nil
+    }
+
+    /// A read/write binding straight into the owning layer's dictionary —
+    /// same idiom as CodeEditorPanel.scriptBinding(for:).
+    func binding(for ref: TextPlacementRef) -> Binding<PlacedText>? {
+        guard let layer = layers.first(where: { $0.id == ref.layerID }) else { return nil }
+        return Binding(
+            get: { layer.textFrames[ref.keyframe] ?? PlacedText(x: 0, y: 0) },
+            set: { layer.textFrames[ref.keyframe] = $0 }
+        )
+    }
 
     private var timerSource: DispatchSourceTimer?
 

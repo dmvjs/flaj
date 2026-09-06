@@ -33,10 +33,17 @@ struct FlajApp: App {
             VStack(spacing: 0) {
                 VSplitView {
                     HSplitView {
+                        ToolbarView(doc: doc)
+                            .frame(width: 40)
                         StageView(doc: doc)
                             .frame(minWidth: 320, minHeight: 260, idealHeight: 380)
-                        DebugConsoleView(doc: doc)
-                            .frame(minWidth: 260, minHeight: 260, idealHeight: 380)
+                        VSplitView {
+                            PropertiesPanelView(doc: doc)
+                                .frame(minHeight: 260, idealHeight: 420)
+                            DebugConsoleView(doc: doc)
+                                .frame(minHeight: 100, idealHeight: 120)
+                        }
+                        .frame(minWidth: 260)
                     }
                     TimelineView(doc: doc)
                         .frame(minHeight: 220, idealHeight: 280)
