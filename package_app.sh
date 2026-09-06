@@ -34,6 +34,8 @@ cat > "$APP/Contents/Info.plist" << 'EOF'
             <key>CFBundleTypeName</key><string>Flaj Document</string>
             <key>CFBundleTypeRole</key><string>Editor</string>
             <key>CFBundleTypeIconFile</key><string>FlajDoc</string>
+            <key>CFBundleTypeExtensions</key>
+            <array><string>flaj</string></array>
             <key>LSItemContentTypes</key>
             <array><string>com.flaj.document</string></array>
         </dict>
@@ -45,7 +47,7 @@ cat > "$APP/Contents/Info.plist" << 'EOF'
             <key>UTTypeDescription</key><string>Flaj Document</string>
             <key>UTTypeIconFile</key><string>FlajDoc</string>
             <key>UTTypeConformsTo</key>
-            <array><string>public.json</string></array>
+            <array><string>public.data</string></array>
             <key>UTTypeTagSpecification</key>
             <dict>
                 <key>public.filename-extension</key>
@@ -58,5 +60,14 @@ cat > "$APP/Contents/Info.plist" << 'EOF'
 EOF
 
 touch "$APP"
+
+# swift build already ad-hoc-signs the bare executable, but Info.plist and
+# the icons get added to the bundle afterward, so the signature never
+# covered them (codesign -dv showed "Sealed Resources=none" and
+# "Info.plist=not bound") — re-signing the whole assembled bundle here
+# seals everything together, which is what Finder/LaunchServices need to
+# trust the declared icons rather than falling back to a generic one.
+codesign --force --deep --sign - "$APP"
+
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$(pwd)/$APP"
 echo "Built $APP"

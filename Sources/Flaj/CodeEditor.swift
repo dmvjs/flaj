@@ -85,6 +85,15 @@ enum JSHighlighter {
         "finally", "throw", "in", "of", "void", "delete", "async", "await", "import", "export"
     ]
 
+    /// The frame-script runtime API installed by TimelineModel.makeJSContext —
+    /// kept in sync by hand since the highlighter can't introspect JSContext.
+    private static let globalNames = [
+        "bg", "stage", "console", "trace", "stop", "play", "goto", "gotoAndPlay", "gotoAndStop"
+    ]
+    private static let globalMembers = [
+        "color", "size", "addText", "setText", "setTransform", "tween", "log", "warn", "error"
+    ]
+
     static func highlight(_ storage: NSTextStorage) {
         let text = storage.string
         let full = NSRange(location: 0, length: (text as NSString).length)
@@ -96,6 +105,7 @@ enum JSHighlighter {
         let stringColor = NSColor(calibratedRed: 0.95, green: 0.45, blue: 0.40, alpha: 1)
         let numberColor = NSColor(calibratedRed: 0.55, green: 0.75, blue: 0.95, alpha: 1)
         let keywordColor = NSColor(calibratedRed: 0.85, green: 0.40, blue: 0.65, alpha: 1)
+        let globalColor = NSColor(calibratedRed: 0.30, green: 0.70, blue: 0.75, alpha: 1)
 
         storage.beginEditing()
         storage.setAttributes([.font: baseFont, .foregroundColor: baseColor], range: full)
@@ -124,6 +134,10 @@ enum JSHighlighter {
 
         colorMatches(#"\b\d+(\.\d+)?\b"#, numberColor, excluding: claimed)
         colorMatches("\\b(" + keywords.joined(separator: "|") + ")\\b", keywordColor, excluding: claimed)
+
+        // Recognized frame-script API — `bg`, `stage`, `stop()`, `bg.color(...)`, etc.
+        colorMatches("\\b(" + globalNames.joined(separator: "|") + ")\\b", globalColor, excluding: claimed)
+        colorMatches("(?<=\\.)(" + globalMembers.joined(separator: "|") + ")\\b", globalColor, excluding: claimed)
 
         // Warn on a const being reassigned — squiggly underline, computed
         // fresh on every keystroke.

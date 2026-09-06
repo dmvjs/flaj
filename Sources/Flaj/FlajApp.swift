@@ -56,6 +56,8 @@ struct FlajApp: App {
                     .keyboardShortcut("s", modifiers: .command)
                 Button("Save As…") { doc.saveDocument(forceDialog: true) }
                     .keyboardShortcut("s", modifiers: [.command, .shift])
+                Divider()
+                Button("Export GIF…") { doc.exportGIF() }
             }
             CommandMenu("Insert") {
                 Button("Frame") { doc.insertFrameAtSelection() }

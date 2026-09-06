@@ -6,8 +6,7 @@ func makeDocIcon() -> NSImage {
     img.lockFocus()
     guard let ctx = NSGraphicsContext.current?.cgContext else { fatalError() }
 
-    // Page silhouette: rounded rect with a folded top-right corner,
-    // matching Finder's generic document-icon convention.
+    // Page silhouette (Finder's generic document convention).
     let margin = size * 0.14
     let pageRect = CGRect(x: margin, y: size * 0.04, width: size - margin * 2, height: size - size * 0.10)
     let fold = pageRect.width * 0.28
@@ -31,7 +30,7 @@ func makeDocIcon() -> NSImage {
     ctx.saveGState()
     ctx.setShadow(offset: CGSize(width: 0, height: -size * 0.015), blur: size * 0.03,
                    color: NSColor.black.withAlphaComponent(0.28).cgColor)
-    ctx.setFillColor(NSColor.white.cgColor)
+    ctx.setFillColor(NSColor(calibratedRed: 1.0, green: 0.35, blue: 0.6, alpha: 1).cgColor)
     ctx.addPath(page)
     ctx.fillPath()
     ctx.restoreGState()
@@ -41,7 +40,6 @@ func makeDocIcon() -> NSImage {
     ctx.addPath(page)
     ctx.strokePath()
 
-    // Folded-corner triangle, subtle gray.
     let foldPath = CGMutablePath()
     foldPath.move(to: CGPoint(x: pageRect.maxX - fold, y: pageRect.minY))
     foldPath.addLine(to: CGPoint(x: pageRect.maxX, y: pageRect.minY + fold))
@@ -51,57 +49,35 @@ func makeDocIcon() -> NSImage {
     ctx.addPath(foldPath)
     ctx.fillPath()
 
-    // The badge: same amber/navy glyph as the app icon, scaled down,
-    // centered in the page.
-    let badgeCenter = CGPoint(x: size * 0.5, y: pageRect.midY + size * 0.05)
-    let badgeRadius = size * 0.225
-
-    let bgColors = [
-        NSColor(calibratedRed: 1.00, green: 0.84, blue: 0.04, alpha: 1).cgColor,
-        NSColor(calibratedRed: 1.00, green: 0.62, blue: 0.04, alpha: 1).cgColor
-    ] as CFArray
-    let bgGradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: bgColors, locations: [0, 1])!
+    // A single furious, glowing red eye at the center of the page.
+    let center = CGPoint(x: size * 0.5, y: pageRect.midY + size * 0.05)
+    let eyeRadius = size * 0.16
     ctx.saveGState()
-    let badgeEllipse = CGRect(x: badgeCenter.x - badgeRadius, y: badgeCenter.y - badgeRadius,
-                               width: badgeRadius * 2, height: badgeRadius * 2)
-    ctx.addEllipse(in: badgeEllipse)
-    ctx.clip()
-    ctx.drawLinearGradient(bgGradient, start: CGPoint(x: badgeEllipse.minX, y: badgeEllipse.maxY),
-                            end: CGPoint(x: badgeEllipse.maxX, y: badgeEllipse.minY), options: [])
+    ctx.setShadow(offset: .zero, blur: size * 0.03, color: NSColor(calibratedRed: 1, green: 0.15, blue: 0.05, alpha: 0.9).cgColor)
+    ctx.setFillColor(NSColor(calibratedRed: 1.0, green: 0.85, blue: 0.55, alpha: 1).cgColor)
+    ctx.addEllipse(in: CGRect(x: center.x - eyeRadius, y: center.y - eyeRadius, width: eyeRadius * 2, height: eyeRadius * 2))
+    ctx.fillPath()
     ctx.restoreGState()
 
-    let text = "JS"
-    let font = NSFont.systemFont(ofSize: badgeRadius * 0.95, weight: .heavy)
-    let textColor = NSColor(calibratedRed: 0.09, green: 0.11, blue: 0.20, alpha: 1)
-    let paragraph = NSMutableParagraphStyle()
-    paragraph.alignment = .center
-    let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: textColor, .paragraphStyle: paragraph]
-    let attrString = NSAttributedString(string: text, attributes: attrs)
-    let textSize = attrString.size()
-    attrString.draw(at: CGPoint(x: badgeCenter.x - textSize.width / 2 - badgeRadius * 0.12,
-                                 y: badgeCenter.y - textSize.height / 2 + badgeRadius * 0.06))
+    let pupilWidth = eyeRadius * 0.34
+    let pupilHeight = eyeRadius * 1.5
+    ctx.setFillColor(NSColor(calibratedRed: 1.0, green: 0.15, blue: 0.05, alpha: 1).cgColor)
+    ctx.addEllipse(in: CGRect(x: center.x - pupilWidth / 2, y: center.y - pupilHeight / 2, width: pupilWidth, height: pupilHeight))
+    ctx.fillPath()
 
-    // Small play triangle badge, bottom-right of the circle.
-    let playRadius = badgeRadius * 0.42
-    let playCenter = CGPoint(x: badgeCenter.x + badgeRadius * 0.72, y: badgeCenter.y - badgeRadius * 0.72)
-    ctx.setFillColor(NSColor(calibratedRed: 0.09, green: 0.11, blue: 0.20, alpha: 1).cgColor)
-    ctx.addEllipse(in: CGRect(x: playCenter.x - playRadius, y: playCenter.y - playRadius,
-                               width: playRadius * 2, height: playRadius * 2))
-    ctx.fillPath()
-    ctx.setStrokeColor(NSColor.white.cgColor)
-    ctx.setLineWidth(size * 0.01)
-    ctx.addEllipse(in: CGRect(x: playCenter.x - playRadius, y: playCenter.y - playRadius,
-                               width: playRadius * 2, height: playRadius * 2))
-    ctx.strokePath()
-    let triSize = playRadius * 0.85
-    let tri = CGMutablePath()
-    tri.move(to: CGPoint(x: playCenter.x - triSize * 0.32, y: playCenter.y + triSize * 0.5))
-    tri.addLine(to: CGPoint(x: playCenter.x - triSize * 0.32, y: playCenter.y - triSize * 0.5))
-    tri.addLine(to: CGPoint(x: playCenter.x + triSize * 0.58, y: playCenter.y))
-    tri.closeSubpath()
-    ctx.setFillColor(NSColor(calibratedRed: 1.00, green: 0.84, blue: 0.04, alpha: 1).cgColor)
-    ctx.addPath(tri)
-    ctx.fillPath()
+    // Angry brows — two dark wedges scowling down toward the center.
+    for side in [-1.0, 1.0] as [CGFloat] {
+        let browOuter = CGPoint(x: center.x + side * eyeRadius * 1.9, y: center.y + eyeRadius * 1.3)
+        let browInner = CGPoint(x: center.x + side * eyeRadius * 0.5, y: center.y + eyeRadius * 0.55)
+        let brow = CGMutablePath()
+        brow.move(to: browOuter)
+        brow.addLine(to: browInner)
+        brow.addLine(to: CGPoint(x: browOuter.x, y: browOuter.y - eyeRadius * 0.5))
+        brow.closeSubpath()
+        ctx.setFillColor(NSColor(calibratedRed: 0.25, green: 0.0, blue: 0.08, alpha: 1).cgColor)
+        ctx.addPath(brow)
+        ctx.fillPath()
+    }
 
     // "FLAJ" wordmark near the bottom of the page.
     let labelFont = NSFont.systemFont(ofSize: size * 0.075, weight: .bold)
@@ -114,7 +90,8 @@ func makeDocIcon() -> NSImage {
     ]
     let label = NSAttributedString(string: "FLAJ", attributes: labelAttrs)
     let labelSize = label.size()
-    label.draw(at: CGPoint(x: size / 2 - labelSize.width / 2 + size * 0.01, y: pageRect.minY + size * 0.06))
+    let labelOrigin = CGPoint(x: size / 2 - labelSize.width / 2 + size * 0.01, y: pageRect.minY + size * 0.06)
+    label.draw(at: labelOrigin)
 
     img.unlockFocus()
     return img

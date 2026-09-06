@@ -1,5 +1,40 @@
 import SwiftUI
 
+/// The Stage's actual content — background + text objects — at a given
+/// `scale` factor. Shared between the live preview (StageView, scaled to
+/// fit its panel) and GIF export (rendered 1:1 at the Stage's real pixel
+/// size via ImageRenderer), so what you see while editing is exactly what
+/// gets exported.
+struct StageContentView: View {
+    @ObservedObject var doc: TimelineDocument
+    var scale: CGFloat
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Rectangle().fill(doc.stageColor)
+            ForEach(doc.stageObjects) { obj in
+                StageTextView(obj: obj, scale: scale)
+            }
+        }
+        .frame(width: doc.stageWidth * scale, height: doc.stageHeight * scale)
+    }
+}
+
+private struct StageTextView: View {
+    @ObservedObject var obj: StageObject
+    var scale: CGFloat
+
+    var body: some View {
+        Text(obj.text)
+            .font(.system(size: obj.fontSize * scale))
+            .foregroundStyle(obj.color)
+            .scaleEffect(obj.scale)
+            .rotationEffect(.degrees(obj.rotation))
+            .opacity(obj.opacity)
+            .position(x: obj.x * scale, y: obj.y * scale)
+    }
+}
+
 /// Flash's "Stage" — the fixed-size render surface, sized/colored from
 /// frame scripts via the `stage`/`bg` JS globals (see TimelineModel).
 /// The Stage itself has fixed pixel dimensions, but this view always scales
@@ -15,14 +50,10 @@ struct StageView: View {
             let availableWidth = max(1, geo.size.width - padding * 2)
             let availableHeight = max(1, geo.size.height - padding * 2)
             let scale = min(availableWidth / doc.stageWidth, availableHeight / doc.stageHeight)
-            let displayWidth = doc.stageWidth * scale
-            let displayHeight = doc.stageHeight * scale
 
             ZStack {
                 Color(nsColor: .underPageBackgroundColor)
-                Rectangle()
-                    .fill(doc.stageColor)
-                    .frame(width: displayWidth, height: displayHeight)
+                StageContentView(doc: doc, scale: scale)
                     .overlay(Rectangle().stroke(Color.black.opacity(0.35), lineWidth: 1))
                     .shadow(color: .black.opacity(0.25), radius: 6)
                 Text("\(Int(doc.stageWidth)) × \(Int(doc.stageHeight))")

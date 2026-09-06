@@ -126,6 +126,9 @@ final class TimelineDocument: ObservableObject {
 
     @Published var currentFileURL: URL?
 
+    @Published var stageObjects: [StageObject] = []
+    private var activeTweens: [ActiveTween] = []
+
     private var timerSource: DispatchSourceTimer?
 
     init(layers: [TLLayer], totalFrames: Int) {
@@ -162,7 +165,7 @@ final class TimelineDocument: ObservableObject {
     /// takes effect before anything visibly advances.
     func play() {
         isPlaying = true
-        runScriptsOnCurrentFrame()
+        stepSimulationFrame()
         guard isPlaying else { return } // the frame's own script may have called stop()
         scheduleTimer()
     }
@@ -212,6 +215,17 @@ final class TimelineDocument: ObservableObject {
     private func tick() {
         guard isPlaying else { return }
         playhead = playhead >= contentLength ? 1 : playhead + 1
+        stepSimulationFrame()
+    }
+
+    /// Advances any in-flight tweens to the current frame, then runs that
+    /// frame's scripts — the two per-frame effects, in the order Flash
+    /// itself applies them (motion updates before actions see the result).
+    /// Shared by real-time playback (tick) and GIF export's frame-by-frame
+    /// simulation, which needs to reproduce the exact same state machine
+    /// synchronously rather than in real time.
+    func stepSimulationFrame() {
+        advanceTweens()
         runScriptsOnCurrentFrame()
     }
 
@@ -291,9 +305,45 @@ final class TimelineDocument: ObservableObject {
             self.stageWidth = max(1, CGFloat(w))
             self.stageHeight = max(1, CGFloat(h))
         }
-        let stageObject = JSValue(newObjectIn: ctx)
-        stageObject?.setObject(stageSizeFn, forKeyedSubscript: "size" as NSString)
-        ctx.setObject(stageObject, forKeyedSubscript: "stage" as NSString)
+
+        // stage.addText(id, text, x, y) — creates a text object at (x, y)
+        // in Stage pixel space, addressed afterward by `id`.
+        let addTextFn: @convention(block) (String, String, Double, Double) -> Void = { [weak self] id, text, x, y in
+            self?.addTextObject(id: id, text: text, x: x, y: y)
+        }
+        // stage.setText(id, text) — updates an existing text object's content.
+        let setTextFn: @convention(block) (String, String) -> Void = { [weak self] id, text in
+            self?.setText(id: id, text: text)
+        }
+        // stage.setTransform(id, { x, y, scale, rotation, opacity }) — any
+        // subset of properties; omitted ones are left unchanged.
+        let setTransformFn: @convention(block) (String, JSValue) -> Void = { [weak self] id, props in
+            guard let self else { return }
+            func value(_ key: String) -> Double? {
+                guard let v = props.forProperty(key), !v.isUndefined else { return nil }
+                return v.toDouble()
+            }
+            self.setTransform(id: id, x: value("x"), y: value("y"), scale: value("scale"),
+                               rotation: value("rotation"), opacity: value("opacity"))
+        }
+        // stage.tween(id, { x, rotation, ... }, frames, "easeInOut") —
+        // animates any subset of properties toward the given targets over
+        // `frames` frames from now. easing is one of linear/easeIn/easeOut/easeInOut.
+        let tweenFn: @convention(block) (String, JSValue, Int, String) -> Void = { [weak self] id, props, frames, easing in
+            guard let self else { return }
+            for key in ["x", "y", "scale", "rotation", "opacity", "fontSize"] {
+                guard let v = props.forProperty(key), !v.isUndefined else { continue }
+                self.startTween(id: id, property: key, to: v.toDouble(), frames: frames, easing: easing)
+            }
+        }
+
+        let stageNamespace = JSValue(newObjectIn: ctx)
+        stageNamespace?.setObject(stageSizeFn, forKeyedSubscript: "size" as NSString)
+        stageNamespace?.setObject(addTextFn, forKeyedSubscript: "addText" as NSString)
+        stageNamespace?.setObject(setTextFn, forKeyedSubscript: "setText" as NSString)
+        stageNamespace?.setObject(setTransformFn, forKeyedSubscript: "setTransform" as NSString)
+        stageNamespace?.setObject(tweenFn, forKeyedSubscript: "tween" as NSString)
+        ctx.setObject(stageNamespace, forKeyedSubscript: "stage" as NSString)
 
         // console.log/warn/error + trace() — the variadic joining happens in
         // JS itself so the native bridge only ever crosses two Strings,
@@ -428,10 +478,87 @@ final class TimelineDocument: ObservableObject {
     }
 
     /// Called when loading a different document — a fresh document shouldn't
-    /// inherit stale JS globals from whatever was previously open.
+    /// inherit stale JS globals from whatever was previously open. Also
+    /// called on every user-initiated "run again," so a fresh run starts
+    /// with a clean Stage too.
     func resetRuntime() {
         jsContext = makeJSContext()
         declaredTopLevelBindings.removeAll()
+        stageObjects.removeAll()
+        activeTweens.removeAll()
+    }
+
+    // MARK: - Stage objects & tweening
+
+    func stageObject(id: String) -> StageObject? {
+        stageObjects.first { $0.id == id }
+    }
+
+    func addTextObject(id: String, text: String, x: Double, y: Double) {
+        guard stageObject(id: id) == nil else { return } // ids are stable handles, not re-creatable
+        stageObjects.append(StageObject(id: id, text: text, x: CGFloat(x), y: CGFloat(y)))
+    }
+
+    func setText(id: String, text: String) {
+        stageObject(id: id)?.text = text
+    }
+
+    func setTransform(id: String, x: Double?, y: Double?, scale: Double?, rotation: Double?, opacity: Double?) {
+        guard let obj = stageObject(id: id) else { return }
+        if let x { obj.x = CGFloat(x) }
+        if let y { obj.y = CGFloat(y) }
+        if let scale { obj.scale = CGFloat(scale) }
+        if let rotation { obj.rotation = rotation }
+        if let opacity { obj.opacity = opacity }
+    }
+
+    /// Schedules a property interpolation starting at the current frame,
+    /// running for `frames` frames. A later call for the same object+
+    /// property replaces whatever tween was already running on it.
+    func startTween(id: String, property rawProperty: String, to: Double, frames: Int, easing rawEasing: String) {
+        guard let obj = stageObject(id: id), let property = TweenableProperty(rawValue: rawProperty) else { return }
+        let easing = Easing(rawValue: rawEasing) ?? .linear
+        let from = currentValue(of: property, on: obj)
+        activeTweens.removeAll { $0.objectID == id && $0.property == property }
+        activeTweens.append(ActiveTween(
+            objectID: id, property: property, fromValue: from, toValue: to,
+            startFrame: playhead, durationFrames: max(1, frames), easing: easing
+        ))
+    }
+
+    private func currentValue(of property: TweenableProperty, on obj: StageObject) -> Double {
+        switch property {
+        case .x: return Double(obj.x)
+        case .y: return Double(obj.y)
+        case .scale: return Double(obj.scale)
+        case .rotation: return obj.rotation
+        case .opacity: return obj.opacity
+        case .fontSize: return Double(obj.fontSize)
+        }
+    }
+
+    private func apply(_ value: Double, to property: TweenableProperty, on obj: StageObject) {
+        switch property {
+        case .x: obj.x = CGFloat(value)
+        case .y: obj.y = CGFloat(value)
+        case .scale: obj.scale = CGFloat(value)
+        case .rotation: obj.rotation = value
+        case .opacity: obj.opacity = value
+        case .fontSize: obj.fontSize = CGFloat(value)
+        }
+    }
+
+    private func advanceTweens() {
+        guard !activeTweens.isEmpty else { return }
+        var finishedIndices: [Int] = []
+        for (i, tween) in activeTweens.enumerated() {
+            guard let obj = stageObject(id: tween.objectID) else { finishedIndices.append(i); continue }
+            let rawT = Double(playhead - tween.startFrame) / Double(tween.durationFrames)
+            let t = tween.easing.apply(rawT)
+            apply(tween.fromValue + (tween.toValue - tween.fromValue) * t, to: tween.property, on: obj)
+            if rawT >= 1 { finishedIndices.append(i) }
+        }
+        for i in finishedIndices.reversed() { activeTweens.remove(at: i) }
     }
 
     /// Layers with anything nested under a collapsed folder filtered out.
