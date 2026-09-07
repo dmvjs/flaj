@@ -11,21 +11,31 @@ struct PropertiesPanelView: View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider()
-            if let ref = doc.selectedPlacement, let binding = doc.binding(for: ref) {
+            // Text selection (on Stage) and tween selection (on the
+            // Timeline) are mutually exclusive contexts — selecting a frame
+            // clears the stage selection (see selectFrame), so whichever is
+            // still set here is whatever was picked most recently.
+            let textBinding = doc.selectedPlacement.flatMap { doc.binding(for: $0) }
+            let tweenBinding = textBinding == nil ? doc.activeTweenRef.flatMap { doc.tweenBinding(for: $0) } : nil
+            if textBinding != nil || tweenBinding != nil {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
-                        textSection(binding)
-                        positionSection(binding)
-                        characterSection(binding)
-                        paragraphSection(binding)
-                        alignSection(binding)
+                        if let binding = textBinding {
+                            textSection(binding)
+                            positionSection(binding)
+                            characterSection(binding)
+                            paragraphSection(binding)
+                            alignSection(binding)
+                        } else if let tweenBinding {
+                            tweenSection(tweenBinding)
+                        }
                     }
                     .padding(10)
                 }
             } else {
                 VStack {
                     Spacer()
-                    Text("Select a text box, or pick the Text tool and click the Stage.")
+                    Text("Select a text box on the Stage, or a frame within a tween on the Timeline.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -129,6 +139,47 @@ struct PropertiesPanelView: View {
                             .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 3))
                     }
                     .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private func tweenSection(_ binding: Binding<TweenSettings>) -> some View {
+        let isLinear = binding.wrappedValue.family == .linear
+        return sectionLabel("Tweening") {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Text("Ease").font(.system(size: 11)).foregroundStyle(.secondary).frame(width: 46, alignment: .leading)
+                    Picker("", selection: binding.family) {
+                        ForEach(EaseFamily.allCases, id: \.self) { family in
+                            Text(family.label).tag(family)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(width: 90)
+
+                    // Direction only means something once a curve family is
+                    // picked (linear has nothing to be "in"/"out" about), but
+                    // stays on-screen and just disables — so it's always
+                    // findable instead of appearing/disappearing.
+                    Picker("", selection: binding.direction) {
+                        ForEach(EaseDirection.allCases, id: \.self) { direction in
+                            Text(direction.label).tag(direction)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .disabled(isLinear)
+                }
+                HStack(spacing: 8) {
+                    Text("Amount").font(.system(size: 11)).foregroundStyle(.secondary).frame(width: 46, alignment: .leading)
+                    Slider(value: binding.amount, in: 0...100)
+                        .disabled(isLinear)
+                    Text("\(Int(binding.wrappedValue.amount.rounded()))%")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 32, alignment: .trailing)
                 }
             }
         }

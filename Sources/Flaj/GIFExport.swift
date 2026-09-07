@@ -21,7 +21,10 @@ extension TimelineDocument {
     /// and capturing the Stage at each step — this has to replay from frame
     /// 1 rather than jump to arbitrary frames, because playback state
     /// (tweens, script-created objects) is only ever computed forward.
-    private func performGIFExport(to url: URL) {
+    ///
+    /// Internal rather than private so tests can drive it directly against a
+    /// known `TimelineDocument`, bypassing the NSSavePanel in `exportGIF()`.
+    func performGIFExport(to url: URL) {
         resetRuntime()
         playhead = 1
         stepSimulationFrame()

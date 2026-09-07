@@ -25,13 +25,15 @@ struct FlajLayerFile: Codable {
     var frames: [FrameMark]
     var frameScripts: [Int: String]
     var textFrames: [Int: PlacedText]
+    var tweenSettings: [Int: TweenSettings]
 
     private enum CodingKeys: String, CodingKey {
-        case name, swatchHex, kind, indent, locked, hidden, expanded, frames, frameScripts, textFrames
+        case name, swatchHex, kind, indent, locked, hidden, expanded, frames, frameScripts, textFrames, tweenSettings
     }
 
     init(name: String, swatchHex: String, kind: LayerKind, indent: Int, locked: Bool, hidden: Bool,
-         expanded: Bool, frames: [FrameMark], frameScripts: [Int: String], textFrames: [Int: PlacedText]) {
+         expanded: Bool, frames: [FrameMark], frameScripts: [Int: String], textFrames: [Int: PlacedText],
+         tweenSettings: [Int: TweenSettings]) {
         self.name = name
         self.swatchHex = swatchHex
         self.kind = kind
@@ -42,9 +44,10 @@ struct FlajLayerFile: Codable {
         self.frames = frames
         self.frameScripts = frameScripts
         self.textFrames = textFrames
+        self.tweenSettings = tweenSettings
     }
 
-    // Custom decode so .flaj files saved before textFrames existed still open.
+    // Custom decode so .flaj files saved before textFrames/tweenSettings existed still open.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         name = try c.decode(String.self, forKey: .name)
@@ -57,6 +60,7 @@ struct FlajLayerFile: Codable {
         frames = try c.decode([FrameMark].self, forKey: .frames)
         frameScripts = try c.decode([Int: String].self, forKey: .frameScripts)
         textFrames = try c.decodeIfPresent([Int: PlacedText].self, forKey: .textFrames) ?? [:]
+        tweenSettings = try c.decodeIfPresent([Int: TweenSettings].self, forKey: .tweenSettings) ?? [:]
     }
 }
 
@@ -101,7 +105,7 @@ extension TimelineDocument {
                     name: layer.name, swatchHex: layer.swatch.hexString, kind: layer.kind,
                     indent: layer.indent, locked: layer.locked, hidden: layer.hidden,
                     expanded: layer.expanded, frames: layer.frames, frameScripts: layer.frameScripts,
-                    textFrames: layer.textFrames
+                    textFrames: layer.textFrames, tweenSettings: layer.tweenSettings
                 )
             }
         )
@@ -123,6 +127,7 @@ extension TimelineDocument {
             layer.expanded = lf.expanded
             layer.frameScripts = lf.frameScripts
             layer.textFrames = lf.textFrames
+            layer.tweenSettings = lf.tweenSettings
             return layer
         }
         selectedLayerID = layers.first?.id

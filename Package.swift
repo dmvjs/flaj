@@ -5,6 +5,12 @@ let package = Package(
     name: "Flaj",
     platforms: [.macOS(.v14)],
     targets: [
-        .executableTarget(name: "Flaj", path: "Sources/Flaj")
+        .executableTarget(name: "Flaj", path: "Sources/Flaj"),
+        .testTarget(
+            name: "FlajTests",
+            dependencies: ["Flaj"],
+            path: "Tests/FlajTests",
+            resources: [.copy("Resources")]
+        )
     ]
 )

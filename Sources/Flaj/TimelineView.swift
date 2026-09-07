@@ -368,47 +368,161 @@ struct FrameRowView: View {
     let frameCount: Int
 
     var body: some View {
+        // Frame -> its tween's start frame, for every frame that's a
+        // tween's end keyframe — lets each cell know whether (and how far
+        // back) it's allowed to be dragged.
+        let tweenEndStarts: [Int: Int] = Dictionary(uniqueKeysWithValues: tweenSpans.map { ($0.end, $0.start) })
+
         ZStack(alignment: .topLeading) {
             HStack(spacing: 0) {
                 ForEach(0..<frameCount, id: \.self) { i in
-                    FrameCellView(
-                        mark: i < layer.frames.count ? layer.frames[i] : .empty,
-                        columnIndex: i,
-                        dimmed: layer.hidden,
-                        isSelected: doc.selectedLayerID == layer.id && doc.selectedFrame == i + 1
-                    )
-                    .frame(width: frameWidth, height: rowHeight)
-                    .contentShape(Rectangle())
-                    .onTapGesture(count: 2) {
-                        doc.selectedLayerID = layer.id
-                        doc.insertKeyframe(layer: layer, at: i + 1, blank: false)
-                        doc.gotoAndStop(i + 1)
-                    }
-                    // simultaneousGesture instead of a second onTapGesture(count: 1):
-                    // stacking two exclusive tap-count gestures forces SwiftUI to
-                    // wait out the double-click window before committing to "single
-                    // click," which is exactly the ~1s selection delay this fixes.
-                    .simultaneousGesture(
-                        TapGesture(count: 1).onEnded {
-                            doc.selectedLayerID = layer.id
-                            doc.gotoAndStop(i + 1)
-                        }
-                    )
-                    .contextMenu {
-                        Button("Insert Frame") { doc.insertFrame(layer: layer, at: i + 1) }
-                        Button("Insert Keyframe") { doc.insertKeyframe(layer: layer, at: i + 1, blank: false) }
-                        Button("Insert Blank Keyframe") { doc.insertKeyframe(layer: layer, at: i + 1, blank: true) }
-                        Divider()
-                        Button("Clear Frame", role: .destructive) { doc.clearFrame(layer: layer, at: i + 1) }
-                    }
+                    FrameCellSlot(doc: doc, layer: layer, frame: i + 1, columnIndex: i,
+                                  tweenEndStart: tweenEndStarts[i + 1])
                 }
             }
+            tweenArrows
+                .allowsHitTesting(false) // decorative — must not steal taps/double-clicks from the cells underneath
             // playhead line through this row
             Rectangle()
                 .fill(Color.red.opacity(0.8))
                 .frame(width: 1, height: rowHeight)
                 .offset(x: CGFloat(doc.playhead - 1) * frameWidth + frameWidth / 2 - 0.5)
         }
+    }
+
+    /// Every `.tween` run on this layer, as the (start, end) keyframes that
+    /// bracket it — used to draw the connecting arrow.
+    private var tweenSpans: [(start: Int, end: Int)] {
+        var spans: [(Int, Int)] = []
+        for (idx, mark) in layer.frames.enumerated() {
+            switch mark {
+            case .keyframe, .emptyKeyframe:
+                let f = idx + 1
+                if let end = layer.tweenTarget(from: f) { spans.append((f, end)) }
+            default: break
+            }
+        }
+        return spans
+    }
+
+    private var tweenArrows: some View {
+        // Keep clear of both dots (they're 5-7pt circles centered on their
+        // cells) — the shaft starts after the start dot and the arrowhead's
+        // tip stops before the end dot, never drawing over either.
+        let dotClearance: CGFloat = 6
+        let arrowSize: CGFloat = 6
+        return ForEach(tweenSpans.indices, id: \.self) { i in
+            let span = tweenSpans[i]
+            let startX = CGFloat(span.start - 1) * frameWidth + frameWidth / 2 + dotClearance
+            let endX = CGFloat(span.end - 1) * frameWidth + frameWidth / 2 - dotClearance
+            let shaftWidth = max(0, endX - startX - arrowSize)
+            ZStack(alignment: .leading) {
+                Rectangle().fill(Color.black.opacity(0.65)).frame(width: shaftWidth, height: 1)
+                Path { path in
+                    // Coordinates local to this shape's own 0...arrowSize
+                    // frame (not centered-at-origin) — Path draws in its
+                    // frame's own top-left-origin space, so a triangle
+                    // spanning y: -3...3 was actually drawn 3pt above the
+                    // frame's true vertical center, not centered within it.
+                    path.move(to: CGPoint(x: 0, y: 0))
+                    path.addLine(to: CGPoint(x: arrowSize, y: arrowSize / 2))
+                    path.addLine(to: CGPoint(x: 0, y: arrowSize))
+                    path.closeSubpath()
+                }
+                .fill(Color.black.opacity(0.65))
+                .frame(width: arrowSize, height: arrowSize)
+                .offset(x: shaftWidth)
+            }
+            .frame(height: rowHeight, alignment: .center)
+            .offset(x: startX)
+        }
+    }
+}
+
+/// One frame cell plus its gestures — its own view (rather than inline in
+/// FrameRowView's ForEach) so it can own `dragTranslationFrames` as local
+/// state for sliding a tween's end keyframe.
+private struct FrameCellSlot: View {
+    @ObservedObject var doc: TimelineDocument
+    @ObservedObject var layer: TLLayer
+    let frame: Int
+    let columnIndex: Int
+    /// Non-nil, and equal to this tween's start frame, when this cell is a
+    /// tween's end keyframe — the one thing that's draggable, and only to
+    /// frames after that start.
+    let tweenEndStart: Int?
+
+    // Local-only during the drag — the model isn't touched until onEnded,
+    // so the gesture stays attached to a stable, unchanging view the whole
+    // time (mutating layer.frames mid-drag would swap this cell's own mark
+    // out from under the very gesture recognizer tracking the drag).
+    @State private var dragTranslationFrames: Int = 0
+
+    var body: some View {
+        FrameCellView(
+            mark: columnIndex < layer.frames.count ? layer.frames[columnIndex] : .empty,
+            columnIndex: columnIndex,
+            dimmed: layer.hidden,
+            isSelected: doc.selectedLayerID == layer.id && doc.selectedFrameRange.contains(frame)
+        )
+        .frame(width: frameWidth, height: rowHeight)
+        .contentShape(Rectangle())
+        .opacity(dragTranslationFrames != 0 ? 0.4 : 1.0)
+        .onTapGesture(count: 2) {
+            doc.selectFrame(layer: layer, frame: frame, extend: false)
+            doc.insertKeyframe(layer: layer, at: frame, blank: false)
+        }
+        // simultaneousGesture instead of a second onTapGesture(count: 1):
+        // stacking two exclusive tap-count gestures forces SwiftUI to
+        // wait out the double-click window before committing to "single
+        // click," which is exactly the ~1s selection delay this fixes.
+        .simultaneousGesture(
+            TapGesture(count: 1).onEnded {
+                doc.selectFrame(layer: layer, frame: frame, extend: NSEvent.modifierFlags.contains(.shift))
+            }
+        )
+        .simultaneousGesture(tweenEndDrag)
+        .contextMenu {
+            Button("Insert Frame") { doc.insertFrame(layer: layer, at: frame) }
+            Button("Insert Keyframe") { doc.insertKeyframe(layer: layer, at: frame, blank: false) }
+            Button("Insert Blank Keyframe") { doc.insertKeyframe(layer: layer, at: frame, blank: true) }
+            Divider()
+            Button("Clear Frame", role: .destructive) { doc.clearFrame(layer: layer, at: frame) }
+            Divider()
+            Button("Create Tween") {
+                let r = doc.selectedFrameRange
+                doc.createTween(layer: layer, from: r.lowerBound, to: r.upperBound)
+            }
+            .disabled(doc.selectedLayerID != layer.id || doc.selectedFrameRange.count < 2)
+            Divider()
+            Button("Copy Text") { doc.copySelectedPlacement() }
+                .disabled(doc.selectedPlacement == nil)
+            Button("Paste Text") { doc.pastePlacedText(layer: layer, at: frame) }
+                .disabled(!doc.hasCopiedText)
+        }
+    }
+
+    /// No-ops entirely on any cell that isn't a tween's end keyframe.
+    private var tweenEndDrag: some Gesture {
+        DragGesture(minimumDistance: 2)
+            .onChanged { value in
+                guard tweenEndStart != nil else { return }
+                dragTranslationFrames = Int((value.translation.width / frameWidth).rounded())
+            }
+            .onEnded { value in
+                guard let tweenEndStart else { return }
+                let deltaFrames = Int((value.translation.width / frameWidth).rounded())
+                // +2, not +1: a tween needs at least one interior .tween
+                // frame to still register as a tween at all (that's the
+                // model's only signal linking the two keyframes) — landing
+                // right next to the start would silently turn it into two
+                // disconnected keyframes instead of the shortest valid tween.
+                let candidate = max(tweenEndStart + 2, frame + deltaFrames)
+                dragTranslationFrames = 0
+                if candidate != frame {
+                    doc.moveTweenEnd(layer: layer, from: frame, to: candidate)
+                }
+            }
     }
 }
 
@@ -420,7 +534,8 @@ struct FrameCellView: View {
 
     private var bandColor: Color {
         switch mark {
-        case .tween, .plain, .spanEnd: return Color.gray.opacity(0.12)
+        case .tween: return Color(red: 0.72, green: 0.65, blue: 0.95).opacity(0.55)
+        case .plain, .spanEnd: return Color.gray.opacity(0.12)
         default: return (columnIndex / 5) % 2 == 0 ? Color.gray.opacity(0.04) : Color.clear
         }
     }
@@ -431,7 +546,12 @@ struct FrameCellView: View {
             if isSelected {
                 Rectangle().stroke(Color.accentColor, lineWidth: 1)
             }
-            Rectangle().fill(Color.secondary.opacity(0.15)).frame(width: 1).frame(maxWidth: .infinity, alignment: .trailing)
+            // Skip the per-cell divider across a tween span — with every
+            // cell tinted, these read as a row of unwanted vertical bars
+            // instead of the plain grid they are elsewhere.
+            if mark != .tween {
+                Rectangle().fill(Color.secondary.opacity(0.15)).frame(width: 1).frame(maxWidth: .infinity, alignment: .trailing)
+            }
 
             switch mark {
             case .keyframe(let hasScript):

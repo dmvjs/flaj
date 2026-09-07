@@ -58,19 +58,40 @@ private struct StagePlacedTextView: View {
     private var placement: PlacedText { layer.textFrames[keyframe] ?? PlacedText(x: 0, y: 0) }
     private var isSelected: Bool { doc.selectedPlacement == ref }
 
+    /// The rendered state at the current playhead — `placement` itself
+    /// outside a tween, or eased-interpolated toward the tween's end
+    /// keyframe while the playhead is inside that span (TLLayer.
+    /// interpolatedPlacedText is the single source of truth for this math —
+    /// insertKeyframe uses the same function to snapshot a mid-tween split).
+    /// Gestures (move/resize) always read/write `placement`/
+    /// `layer.textFrames[keyframe]` directly, never this — you edit a
+    /// tween's endpoints, not an in-between frame.
+    private var displayPlacement: PlacedText {
+        layer.interpolatedPlacedText(at: doc.playhead) ?? placement
+    }
+
+    private var spinDegrees: Double {
+        guard let endKf = layer.tweenTarget(from: keyframe), endKf > keyframe else { return 0 }
+        let settings = layer.tweenSettings[keyframe] ?? TweenSettings()
+        let rawT = Double(doc.playhead - keyframe) / Double(endKf - keyframe)
+        return settings.spinDegrees(at: rawT)
+    }
+
     var body: some View {
-        Text(placement.text)
-            .font(.custom(placement.fontName, size: placement.fontSize * scale))
-            .bold(placement.bold)
-            .italic(placement.italic)
-            .foregroundStyle(Color(hex: placement.colorHex))
-            .multilineTextAlignment(placement.alignment.swiftUIAlignment)
-            .frame(width: placement.width * scale, height: placement.height * scale,
-                   alignment: placement.alignment.frameAlignment)
+        let shown = displayPlacement
+        Text(shown.text)
+            .font(.custom(shown.fontName, size: shown.fontSize * scale))
+            .bold(shown.bold)
+            .italic(shown.italic)
+            .foregroundStyle(Color(hex: shown.colorHex))
+            .multilineTextAlignment(shown.alignment.swiftUIAlignment)
+            .frame(width: shown.width * scale, height: shown.height * scale,
+                   alignment: shown.alignment.frameAlignment)
             .contentShape(Rectangle())
             .overlay(isSelected ? Rectangle().stroke(Color.accentColor, lineWidth: 1.5) : nil)
             .overlay(alignment: .bottomTrailing) { if isSelected { resizeHandle } }
-            .position(x: (placement.x + placement.width / 2) * scale, y: (placement.y + placement.height / 2) * scale)
+            .rotationEffect(.degrees(spinDegrees))
+            .position(x: (shown.x + shown.width / 2) * scale, y: (shown.y + shown.height / 2) * scale)
             .onTapGesture { doc.selectedPlacement = ref }
             .gesture(moveGesture)
     }

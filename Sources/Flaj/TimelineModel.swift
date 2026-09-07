@@ -41,13 +41,13 @@ enum FrameMark: Equatable, Codable {
     }
 }
 
-enum LayerKind: Codable {
+enum LayerKind: Codable, Equatable {
     case normal, folder, mask, maskedGuide, guide
 }
 
 /// One line in the debug console — Flash's Output panel equivalent.
 struct ConsoleMessage: Identifiable {
-    enum Level { case log, warn, error }
+    enum Level: Equatable { case log, warn, error }
     let id = UUID()
     let level: Level
     let text: String
@@ -66,6 +66,7 @@ final class TLLayer: Identifiable, ObservableObject {
     @Published var frames: [FrameMark]
     @Published var frameScripts: [Int: String] = [:]   // 1-based frame number -> JS/TS source
     @Published var textFrames: [Int: PlacedText] = [:] // 1-based keyframe number -> placed text
+    @Published var tweenSettings: [Int: TweenSettings] = [:] // keyed by the tween span's start keyframe
 
     func isKeyframe(at frame: Int) -> Bool {
         let idx = frame - 1
@@ -90,6 +91,44 @@ final class TLLayer: Identifiable, ObservableObject {
             }
         }
         return nil
+    }
+
+    /// If `startKeyframe` opens a `.tween` run (created by `createTween`),
+    /// the keyframe that closes it — i.e. the tween's "B" state. nil if
+    /// `startKeyframe` isn't followed by an unbroken `.tween` run ending in
+    /// a real keyframe (a plain span, or no span at all).
+    func tweenTarget(from startKeyframe: Int) -> Int? {
+        var i = startKeyframe // 0-based index of the frame right after startKeyframe
+        guard frames.indices.contains(i) else { return nil }
+        guard case .tween = frames[i] else { return nil }
+        while frames.indices.contains(i) {
+            switch frames[i] {
+            case .tween: i += 1
+            case .keyframe, .emptyKeyframe: return i + 1
+            default: return nil
+            }
+        }
+        return nil
+    }
+
+    /// What's actually showing at `frame` — the governing keyframe's
+    /// PlacedText as-is for a plain span, or eased-interpolated toward the
+    /// tween's end keyframe for a tween span. nil if there's no content at
+    /// `frame` at all. Single source of truth shared by StagePlacedTextView
+    /// (live rendering) and insertKeyframe (snapshotting a mid-tween split).
+    func interpolatedPlacedText(at frame: Int) -> PlacedText? {
+        guard let kf = governingKeyframe(at: frame), let base = textFrames[kf] else { return nil }
+        guard let endKf = tweenTarget(from: kf), let end = textFrames[endKf], endKf > kf else { return base }
+        let settings = tweenSettings[kf] ?? TweenSettings()
+        let rawT = Double(frame - kf) / Double(endKf - kf)
+        let t = settings.easedProgress(rawT)
+        var result = base
+        result.x = base.x + (end.x - base.x) * t
+        result.y = base.y + (end.y - base.y) * t
+        result.width = base.width + (end.width - base.width) * t
+        result.height = base.height + (end.height - base.height) * t
+        result.fontSize = base.fontSize + (end.fontSize - base.fontSize) * t
+        return result
     }
 
     init(name: String, swatch: Color, kind: LayerKind = .normal, indent: Int = 0,
@@ -134,6 +173,36 @@ final class TimelineDocument: ObservableObject {
     // stay put on whatever frame was last explicitly clicked, not flicker
     // through every frame as the movie runs.
     @Published var selectedFrame: Int = 1
+
+    // Shift-click range extension on the timeline grid, anchored at
+    // `selectedFrame`. Only meaningful on `selectedLayerID`'s row — picking
+    // a different layer (with or without shift) starts a fresh anchor there
+    // instead of extending across layers, since a tween/range is inherently
+    // a single-layer span.
+    @Published var rangeSelectionEnd: Int?
+
+    var selectedFrameRange: ClosedRange<Int> {
+        guard let end = rangeSelectionEnd else { return selectedFrame...selectedFrame }
+        return min(selectedFrame, end)...max(selectedFrame, end)
+    }
+
+    /// The single entry point the frame grid's click handlers call — a
+    /// plain click moves the playhead and starts a fresh range anchor;
+    /// shift-click (only honored on the already-selected layer) extends the
+    /// range without moving the playhead, matching Flash's frame-selection
+    /// behavior. Clears any stage text selection — the Properties panel
+    /// shows text properties OR tween properties, matching whichever you
+    /// selected most recently, never both at once.
+    func selectFrame(layer: TLLayer, frame: Int, extend: Bool) {
+        selectedPlacement = nil
+        if extend && selectedLayerID == layer.id {
+            rangeSelectionEnd = frame
+        } else {
+            selectedLayerID = layer.id
+            gotoAndStop(frame)
+            rangeSelectionEnd = nil
+        }
+    }
 
     // The Stage — Flash's term for the fixed-size render surface, scriptable
     // from frame code via the `stage`/`bg` JS globals below.
@@ -185,6 +254,121 @@ final class TimelineDocument: ObservableObject {
         return Binding(
             get: { layer.textFrames[ref.keyframe] ?? PlacedText(x: 0, y: 0) },
             set: { layer.textFrames[ref.keyframe] = $0 }
+        )
+    }
+
+    // MARK: - Copy/paste placed text
+
+    private var copiedPlacedText: PlacedText?
+
+    var hasCopiedText: Bool { copiedPlacedText != nil }
+
+    func copySelectedPlacement() {
+        guard let ref = selectedPlacement, let layer = layers.first(where: { $0.id == ref.layerID }) else { return }
+        copiedPlacedText = layer.textFrames[ref.keyframe]
+    }
+
+    /// Pastes at `frame` on `layer` — same position/size/font as copied, so
+    /// it's a ready-made "B" state: drag it somewhere else and Create Tween
+    /// between the two keyframes.
+    func pastePlacedText(layer: TLLayer, at frame: Int) {
+        guard let copied = copiedPlacedText else { return }
+        let kf: Int
+        if let existing = layer.governingKeyframe(at: frame), existing == frame {
+            kf = existing
+        } else {
+            insertKeyframe(layer: layer, at: frame, blank: false)
+            kf = frame
+        }
+        layer.textFrames[kf] = copied
+        selectedPlacement = TextPlacementRef(layerID: layer.id, keyframe: kf)
+    }
+
+    // MARK: - Motion tween
+
+    /// Turns the keyframe range [startFrame, endFrame] on `layer` into a
+    /// motion tween: `endFrame` becomes a keyframe (inheriting the start's
+    /// placed text if it doesn't already have its own — e.g. from a paste),
+    /// and every frame strictly between the two is marked `.tween`, which
+    /// both draws the connecting arrow (TimelineView) and drives the
+    /// interpolated render (StageView.StagePlacedTextView).
+    func createTween(layer: TLLayer, from startFrame: Int, to endFrame: Int) {
+        guard startFrame != endFrame else { return }
+        let lo = min(startFrame, endFrame), hi = max(startFrame, endFrame)
+        guard layer.isKeyframe(at: lo), layer.textFrames[lo] != nil else {
+            logToConsole("Create Tween needs a keyframe with placed text at the start of the range.", level: .warn)
+            return
+        }
+        if !layer.isKeyframe(at: hi) {
+            insertKeyframe(layer: layer, at: hi, blank: false)
+        }
+        if layer.textFrames[hi] == nil {
+            layer.textFrames[hi] = layer.textFrames[lo]
+        }
+        growCapacity(to: max(totalFrames, hi))
+        for f in (lo + 1)..<hi {
+            layer.frames[f - 1] = .tween
+        }
+        // Drop the range highlight — otherwise every cell's selection
+        // border stays drawn on top of the tween band, reading as a grid
+        // instead of the smooth lavender span with a single arrow.
+        selectedFrame = lo
+        rangeSelectionEnd = nil
+        if layer.tweenSettings[lo] == nil {
+            layer.tweenSettings[lo] = TweenSettings()
+        }
+    }
+
+    /// Slides a tween's end keyframe from `oldEnd` to `newEnd` on the same
+    /// layer — lengthening or shortening the span. `newEnd` must land at
+    /// least 2 frames after the tween's start (checked here regardless of
+    /// what the caller already clamped to, since this is also the model's
+    /// own invariant) — landing right next to the start would leave no
+    /// interior `.tween` frame, the model's only signal that two keyframes
+    /// are still tween-linked at all. The end keyframe's content (placed
+    /// text, script) moves with it; frames newly covered by a longer span
+    /// become `.tween`, frames dropped by a shorter one become `.empty`.
+    func moveTweenEnd(layer: TLLayer, from oldEnd: Int, to newEnd: Int) {
+        guard oldEnd != newEnd,
+              let start = layer.governingKeyframe(at: oldEnd - 1),
+              layer.tweenTarget(from: start) == oldEnd,
+              newEnd > start + 1 else { return }
+
+        growCapacity(to: max(totalFrames, newEnd))
+        let movedText = layer.textFrames[oldEnd]
+        let movedScript = layer.frameScripts[oldEnd]
+        layer.textFrames[oldEnd] = nil
+        layer.frameScripts[oldEnd] = nil
+
+        if newEnd > oldEnd {
+            for f in oldEnd...(newEnd - 1) { layer.frames[f - 1] = .tween }
+        } else {
+            for f in (newEnd + 1)...oldEnd { layer.frames[f - 1] = .empty }
+        }
+        layer.textFrames[newEnd] = movedText
+        layer.frameScripts[newEnd] = movedScript
+        layer.frames[newEnd - 1] = .keyframe(hasScript: !(movedScript ?? "").isEmpty)
+
+        if selectedFrame == oldEnd { selectedFrame = newEnd }
+    }
+
+    /// The tween span (if any) that governs `selectedFrame` on
+    /// `selectedLayerID` — what the Properties panel's Tween section binds
+    /// to. Distinct from `selectedPlacement`: this tracks a timeline frame
+    /// selection, not a stage object selection, so both can be shown at once.
+    struct TweenRef: Equatable { let layerID: UUID; let startFrame: Int }
+
+    var activeTweenRef: TweenRef? {
+        guard let id = selectedLayerID, let layer = layers.first(where: { $0.id == id }) else { return nil }
+        guard let kf = layer.governingKeyframe(at: selectedFrame), layer.tweenTarget(from: kf) != nil else { return nil }
+        return TweenRef(layerID: id, startFrame: kf)
+    }
+
+    func tweenBinding(for ref: TweenRef) -> Binding<TweenSettings>? {
+        guard let layer = layers.first(where: { $0.id == ref.layerID }) else { return nil }
+        return Binding(
+            get: { layer.tweenSettings[ref.startFrame] ?? TweenSettings() },
+            set: { layer.tweenSettings[ref.startFrame] = $0 }
         )
     }
 
@@ -705,20 +889,43 @@ final class TimelineDocument: ObservableObject {
         layer.frames[idx] = .plain
     }
 
-    /// F6 (keyframe) / F7 (blank keyframe) in classic Flash.
+    /// F6 (keyframe) / F7 (blank keyframe) in classic Flash. A non-blank
+    /// keyframe inherits whatever was actually showing at `frame` — computed
+    /// (and captured into textFrames) before the frame mark changes, since
+    /// that computation reads the current span/tween that's about to be
+    /// split. Splitting a tween this way is exactly how Flash lets you
+    /// "freeze" an in-between position into its own keyframe.
     func insertKeyframe(layer: TLLayer, at frame: Int, blank: Bool) {
         growCapacity(to: max(totalFrames, frame))
         let idx = frame - 1
         guard layer.frames.indices.contains(idx) else { return }
+        if !blank, layer.textFrames[frame] == nil, let snapshot = layer.interpolatedPlacedText(at: frame) {
+            layer.textFrames[frame] = snapshot
+        }
         layer.frames[idx] = blank ? .emptyKeyframe : .keyframe(hasScript: !(layer.frameScripts[frame] ?? "").isEmpty)
     }
 
-    /// Shift+F5 in classic Flash — removes frames.
+    /// Shift+F5 in classic Flash — removes frames. Removing a keyframe that
+    /// sits exactly between two tweens (one ending here, another starting
+    /// here — e.g. the shared frame left by splitting a tween via Insert
+    /// Keyframe) merges them into a single tween spanning the gap, with the
+    /// removed keyframe's own content excluded, rather than leaving a blank
+    /// hole that breaks both.
     func clearFrame(layer: TLLayer, at frame: Int) {
         let idx = frame - 1
         guard layer.frames.indices.contains(idx) else { return }
-        layer.frames[idx] = .empty
+
+        if layer.isKeyframe(at: frame), frame > 1,
+           let incomingStart = layer.governingKeyframe(at: frame - 1),
+           layer.tweenTarget(from: incomingStart) == frame,
+           layer.tweenTarget(from: frame) != nil {
+            layer.frames[idx] = .tween
+        } else {
+            layer.frames[idx] = .empty
+        }
         layer.frameScripts[frame] = nil
+        layer.textFrames[frame] = nil
+        layer.tweenSettings[frame] = nil
     }
 
     func setScript(_ text: String, layer: TLLayer, at frame: Int) {
