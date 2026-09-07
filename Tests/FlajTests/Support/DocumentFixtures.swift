@@ -105,6 +105,7 @@ enum DocumentFixtures {
         ]
         art.tweenSettings = [1: TweenSettings(family: .elastic, direction: .easeInOut, amount: 65, rotate: .cw, rotateTimes: 2)]
         art.colorTweenSettings = [1: TweenSettings(family: .sine, direction: .easeIn, amount: 80)]
+        art.frameLabels = [1: "start"]
 
         let doc = TimelineDocument(layers: [actions, art], totalFrames: 3)
         doc.stageWidth = 320

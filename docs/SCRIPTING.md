@@ -39,6 +39,25 @@ the last frame that actually has content, not the document's nominal length
 — handy for a menu that jumps around a short loop without ever falling off
 the end into blank frames.
 
+### Frame labels
+
+Any keyframe can carry a name — set it in the Properties panel's "Frame
+Label" field when a keyframe is selected on the Timeline (shown there as a
+small red flag). All three navigation functions above accept a label
+instead of a frame number:
+
+```js
+gotoAndPlay('start');
+gotoAndStop('menu');
+goto('loop');
+```
+
+A label is looked up by exact match across every layer, so one shared
+"labels" or "actions" layer works the same as scattering them across
+whichever layers happen to have the relevant keyframes. Calling with a
+label that doesn't exist anywhere logs a console warning and leaves the
+playhead where it was — it doesn't jump to frame 0 or throw.
+
 ## Background
 
 ```js

@@ -24,7 +24,13 @@ struct PropertiesPanelView: View {
             let textBinding = doc.selectedPlacement.flatMap { doc.binding(for: $0) }
             let tweenBinding = textBinding == nil ? doc.activeTweenRef.flatMap { doc.tweenBinding(for: $0) } : nil
             let colorTweenBinding = textBinding == nil ? doc.activeTweenRef.flatMap { doc.colorTweenBinding(for: $0) } : nil
-            if textBinding != nil || tweenBinding != nil {
+            // Falls back to "which keyframe governs the selected frame,
+            // if any" only once text/tween selection are both ruled out —
+            // same mutual-exclusivity rule as the other two.
+            let labelTarget: (layer: TLLayer, frame: Int)? = (textBinding == nil && tweenBinding == nil)
+                ? doc.selectedLayer.flatMap { layer in layer.governingKeyframe(at: doc.selectedFrame).map { (layer, $0) } }
+                : nil
+            if textBinding != nil || tweenBinding != nil || labelTarget != nil {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
                         if let binding = textBinding {
@@ -36,6 +42,8 @@ struct PropertiesPanelView: View {
                         } else if let tweenBinding, let colorTweenBinding {
                             tweenSection(tweenBinding)
                             colorTweenSection(colorTweenBinding)
+                        } else if let labelTarget {
+                            labelSection(layer: labelTarget.layer, frame: labelTarget.frame)
                         }
                     }
                     .padding(10)
@@ -43,7 +51,7 @@ struct PropertiesPanelView: View {
             } else {
                 VStack {
                     Spacer()
-                    Text("Select a text box on the Stage, or a frame within a tween on the Timeline.")
+                    Text("Select a text box on the Stage, or a keyframe on the Timeline.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -204,6 +212,17 @@ struct PropertiesPanelView: View {
 
     private func colorTweenSection(_ binding: Binding<TweenSettings>) -> some View {
         sectionLabel("Color Effect") { easingControls(binding) }
+    }
+
+    /// A named navigation target for `gotoAndPlay("name")`/`gotoAndStop`/
+    /// `goto` in frame scripts (see docs/SCRIPTING.md) — Flash's own frame
+    /// labels, shown on the Timeline as a small red flag (TimelineView.
+    /// frameLabelFlags).
+    private func labelSection(layer: TLLayer, frame: Int) -> some View {
+        sectionLabel("Frame Label") {
+            TextField("Unlabeled", text: doc.labelBinding(layer: layer, at: frame))
+                .textFieldStyle(.roundedBorder)
+        }
     }
 
     private func easingControls(_ binding: Binding<TweenSettings>) -> some View {

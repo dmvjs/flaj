@@ -311,4 +311,118 @@ final class WebExportTests: XCTestCase {
         XCTAssertEqual(file.totalFrames, doc.totalFrames)
         XCTAssertEqual(file.layers.count, doc.layers.count)
     }
+
+    /// player.js's `gotoAndStop`/`gotoAndPlay` are a hand-ported mirror of
+    /// the native JSContext bridge (see resolveFrameArgument in
+    /// TimelineModel.swift) — this is what actually proves the exported
+    /// page's label lookup works end to end, not just that it type-checks.
+    /// Same black/white-flip shape as testBlackWhiteFlipRunsAndAdvancesFrames,
+    /// navigating by the frame-2 label instead of the frame number.
+    func testGotoAndStopAndGotoAndPlayResolveAFrameLabel() async throws {
+        let layer = TLLayer(
+            name: "actions", swatch: .yellow,
+            frames: [.keyframe(hasScript: true), .keyframe(hasScript: true)]
+        )
+        layer.frameScripts = [1: "bg.color('black');", 2: "bg.color('white');"]
+        layer.frameLabels[2] = "white"
+        let doc = TimelineDocument(layers: [layer], totalFrames: 2)
+        doc.stageWidth = 8
+        doc.stageHeight = 8
+        doc.fps = 1
+
+        let url = exportedURL(doc)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let harness = WebViewHarness()
+        try await harness.load(fileURL: url)
+
+        try await harness.evaluate("gotoAndStop('white')")
+        let stoppedColor = try await harness.evaluate("getComputedStyle(document.getElementById('flaj-stage')).backgroundColor")
+        XCTAssertEqual(stoppedColor as? String, "rgb(255, 255, 255)")
+
+        try await harness.evaluate("gotoAndStop(1)") // back to frame 1 before proving gotoAndPlay independently
+        try await harness.evaluate("gotoAndPlay('white')")
+        let playedColor = try await harness.evaluate("getComputedStyle(document.getElementById('flaj-stage')).backgroundColor")
+        XCTAssertEqual(playedColor as? String, "rgb(255, 255, 255)")
+    }
+
+    /// An unrecognized label should be a no-op (playhead stays put), not a
+    /// thrown error or a silent jump to frame 0 — mirrors
+    /// testGotoAndPlayByLabelLogsAWarningForAnUnknownLabel on the native side.
+    func testGotoAndStopIgnoresAnUnknownLabel() async throws {
+        let layer = TLLayer(
+            name: "actions", swatch: .yellow,
+            frames: [.keyframe(hasScript: true), .keyframe(hasScript: true)]
+        )
+        layer.frameScripts = [1: "bg.color('black');", 2: "bg.color('white');"]
+        let doc = TimelineDocument(layers: [layer], totalFrames: 2)
+        doc.stageWidth = 8
+        doc.stageHeight = 8
+        doc.fps = 1
+
+        let url = exportedURL(doc)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let harness = WebViewHarness()
+        try await harness.load(fileURL: url)
+
+        try await harness.evaluate("gotoAndStop('nowhere')")
+        let color = try await harness.evaluate("getComputedStyle(document.getElementById('flaj-stage')).backgroundColor")
+        XCTAssertEqual(color as? String, "rgb(0, 0, 0)", "an unresolved label shouldn't move off frame 1's black")
+    }
+
+    /// Flash's "named anchor" convention — a frame label starting with "#"
+    /// updates the page's URL fragment when reached (see updateNamedAnchor
+    /// in player.js), making that point in the movie a real bookmarkable/
+    /// back-button-navigable location.
+    func testLandingOnAHashLabeledFrameUpdatesTheURLFragment() async throws {
+        let layer = TLLayer(
+            name: "actions", swatch: .yellow,
+            frames: [.keyframe(hasScript: false), .keyframe(hasScript: false)]
+        )
+        layer.frameLabels = [1: "intro", 2: "#chapter-two"]
+        let doc = TimelineDocument(layers: [layer], totalFrames: 2)
+        doc.stageWidth = 8
+        doc.stageHeight = 8
+        doc.fps = 1
+
+        let url = exportedURL(doc)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let harness = WebViewHarness()
+        try await harness.load(fileURL: url)
+
+        let initialHash = try await harness.evaluate("location.hash")
+        XCTAssertEqual(initialHash as? String, "", "frame 1's label doesn't start with # — shouldn't touch the URL")
+
+        try await harness.evaluate("gotoAndStop(2)")
+        let hashAfter = try await harness.evaluate("location.hash")
+        XCTAssertEqual(hashAfter as? String, "#chapter-two")
+    }
+
+    /// The read side of the same convention: opening the exported page with
+    /// a URL fragment matching a named anchor should start the movie there
+    /// instead of frame 1.
+    func testOpeningWithAMatchingURLFragmentDeepLinksToThatFrame() async throws {
+        let layer = TLLayer(
+            name: "actions", swatch: .yellow,
+            frames: [.keyframe(hasScript: true), .keyframe(hasScript: true)]
+        )
+        layer.frameScripts = [1: "bg.color('black');", 2: "bg.color('white');"]
+        layer.frameLabels[2] = "#chapter-two"
+        let doc = TimelineDocument(layers: [layer], totalFrames: 2)
+        doc.stageWidth = 8
+        doc.stageHeight = 8
+        doc.fps = 1
+
+        let url = exportedURL(doc)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let deepLinkURL = try XCTUnwrap(URL(string: url.absoluteString + "#chapter-two"))
+
+        let harness = WebViewHarness()
+        try await harness.load(fileURL: deepLinkURL)
+
+        let color = try await harness.evaluate("getComputedStyle(document.getElementById('flaj-stage')).backgroundColor")
+        XCTAssertEqual(color as? String, "rgb(255, 255, 255)", "should have opened straight on frame 2, not frame 1")
+    }
 }

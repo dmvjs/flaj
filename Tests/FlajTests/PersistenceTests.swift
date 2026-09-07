@@ -43,6 +43,7 @@ final class PersistenceTests: XCTestCase {
             XCTAssertEqual(got.textFrames, want.textFrames)
             XCTAssertEqual(got.tweenSettings, want.tweenSettings)
             XCTAssertEqual(got.colorTweenSettings, want.colorTweenSettings)
+            XCTAssertEqual(got.frameLabels, want.frameLabels)
         }
     }
 

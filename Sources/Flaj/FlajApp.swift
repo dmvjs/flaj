@@ -58,6 +58,14 @@ struct FlajApp: App {
         }
         .windowResizability(.contentSize)
         .commands {
+            CommandGroup(replacing: .undoRedo) {
+                Button("Undo") { doc.undo() }
+                    .keyboardShortcut("z", modifiers: .command)
+                    .disabled(!doc.canUndo)
+                Button("Redo") { doc.redo() }
+                    .keyboardShortcut("z", modifiers: [.command, .shift])
+                    .disabled(!doc.canRedo)
+            }
             CommandGroup(after: .newItem) {
                 Button("Open…") { doc.openDocument() }
                     .keyboardShortcut("o", modifiers: .command)

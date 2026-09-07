@@ -38,6 +38,56 @@ struct StageContentView: View {
     }
 }
 
+/// Ghosted nearby-frame content, Flash's own onion-skin convention — frames
+/// before the playhead tint blue, frames after tint orange, so which
+/// direction a ghost is in stays legible even with several stacked.
+/// Deliberately lives in StageView, not StageContentView: the latter is
+/// shared with GIF export's frame-by-frame render (see its own doc
+/// comment), and a ghost frame must never leak into exported output —
+/// this overlay is drawn as a sibling, editor-preview only.
+private struct OnionSkinOverlay: View {
+    let doc: TimelineDocument
+    var scale: CGFloat
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(offsets, id: \.self) { offset in
+                let frame = doc.playhead + offset
+                if frame >= 1 && frame <= doc.totalFrames {
+                    ForEach(doc.visibleLayers.filter { !$0.hidden }) { layer in
+                        if let placement = layer.interpolatedPlacedText(at: frame) {
+                            ghost(placement, tint: offset < 0 ? .blue : .orange)
+                        }
+                    }
+                }
+            }
+        }
+        .frame(width: doc.stageWidth * scale, height: doc.stageHeight * scale)
+        .allowsHitTesting(false) // purely a visual aid — never steals the real content's taps/drags
+    }
+
+    /// `-range...range` excluding 0 (the playhead's own frame, already
+    /// drawn at full opacity by StageContentView).
+    private var offsets: [Int] {
+        (-doc.onionSkinRange...doc.onionSkinRange).filter { $0 != 0 }
+    }
+
+    /// A flat tint rather than the placement's own color — the point is to
+    /// see *where* content was/will be at a glance, not to preview an
+    /// in-progress color tween a second time.
+    private func ghost(_ p: PlacedText, tint: Color) -> some View {
+        Text(p.text)
+            .font(.custom(p.fontName, size: p.fontSize * scale))
+            .bold(p.bold)
+            .italic(p.italic)
+            .foregroundStyle(tint)
+            .multilineTextAlignment(p.alignment.swiftUIAlignment)
+            .frame(width: p.width * scale, height: p.height * scale, alignment: p.alignment.frameAlignment)
+            .opacity(0.35)
+            .position(x: (p.x + p.width / 2) * scale, y: (p.y + p.height / 2) * scale)
+    }
+}
+
 /// A layer's authored, design-time text — placed and edited with the Text
 /// tool, distinct from the script-driven StageObject/StageTextView above.
 private struct StagePlacedTextView: View {
@@ -113,7 +163,7 @@ private struct StagePlacedTextView: View {
                 var p = start
                 p.x = start.x + value.translation.width / scale
                 p.y = start.y + value.translation.height / scale
-                layer.textFrames[keyframe] = p
+                doc.withUndoSnapshot(coalesce: ref.undoToken) { layer.textFrames[keyframe] = p }
             }
             .onEnded { _ in moveStart = nil }
     }
@@ -130,7 +180,7 @@ private struct StagePlacedTextView: View {
                         var p = start
                         p.width = max(20, start.width + value.translation.width / scale)
                         p.height = max(16, start.height + value.translation.height / scale)
-                        layer.textFrames[keyframe] = p
+                        doc.withUndoSnapshot(coalesce: ref.undoToken) { layer.textFrames[keyframe] = p }
                     }
                     .onEnded { _ in resizeStart = nil }
             )
@@ -182,6 +232,9 @@ struct StageView: View {
                 StageContentView(doc: doc, scale: scale)
                     .overlay(Rectangle().stroke(Color.black.opacity(0.35), lineWidth: 1))
                     .shadow(color: .black.opacity(0.25), radius: 6)
+                if doc.onionSkinEnabled {
+                    OnionSkinOverlay(doc: doc, scale: scale)
+                }
                 Text("\(Int(doc.stageWidth)) × \(Int(doc.stageHeight))")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)

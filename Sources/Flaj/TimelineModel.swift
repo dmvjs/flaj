@@ -42,7 +42,7 @@ enum FrameMark: Equatable, Codable {
 }
 
 enum LayerKind: Codable, Equatable {
-    case normal, folder, mask, maskedGuide, guide
+    case normal, folder
 }
 
 /// One line in the debug console — Flash's Output panel equivalent.
@@ -56,7 +56,7 @@ struct ConsoleMessage: Identifiable {
 
 @Observable
 final class TLLayer: Identifiable {
-    let id = UUID()
+    let id: UUID
     var name: String
     var swatch: Color
     var kind: LayerKind
@@ -67,6 +67,11 @@ final class TLLayer: Identifiable {
     var frames: [FrameMark]
     var frameScripts: [Int: String] = [:]   // 1-based frame number -> JS/TS source
     var textFrames: [Int: PlacedText] = [:] // 1-based keyframe number -> placed text
+    // Named keyframes — a navigation target for gotoAndPlay("name")/
+    // gotoAndStop("name")/goto("name") from a frame script, matching
+    // Flash's own frame labels. Purely a keyframe annotation, same
+    // dictionary shape as frameScripts/textFrames.
+    var frameLabels: [Int: String] = [:]
     var tweenSettings: [Int: TweenSettings] = [:] // keyed by the tween span's start keyframe
     // Color/opacity ease independently of position/size — same start
     // keyframe key, same span, but its own family/direction/amount, the way
@@ -174,9 +179,10 @@ final class TLLayer: Identifiable {
         return String(format: "#%02X%02X%02X", lerp(r0, r1), lerp(g0, g1), lerp(b0, b1))
     }
 
-    init(name: String, swatch: Color, kind: LayerKind = .normal, indent: Int = 0,
+    init(id: UUID = UUID(), name: String, swatch: Color, kind: LayerKind = .normal, indent: Int = 0,
          locked: Bool = false, hidden: Bool = false, frames: [FrameMark],
          textFrames: [Int: PlacedText] = [:]) {
+        self.id = id
         self.name = name
         self.swatch = swatch
         self.kind = kind
@@ -279,13 +285,48 @@ final class TimelineDocument {
     var stageObjects: [StageObject] = []
     @ObservationIgnored private var activeTweens: [ActiveTween] = []
 
+    // MARK: - Undo/Redo
+    //
+    // Whole-document snapshots (see Undo.swift), reusing the same Codable
+    // round-trip Persistence.swift already uses for .flaj files rather than
+    // tracking per-field diffs. Declared here, not in that extension,
+    // because a stored property can only be added where the class itself
+    // is declared. `undoStack`/`redoStack` stay observable (not
+    // `@ObservationIgnored`) since `canUndo`/`canRedo` read them to drive
+    // the Edit menu's enabled state; `coalescingToken`/`undoActionDepth`
+    // are pure bookkeeping nothing displays.
+    var undoStack: [UndoEntry] = []
+    var redoStack: [UndoEntry] = []
+    @ObservationIgnored var coalescingToken: String?
+    @ObservationIgnored var undoActionDepth = 0
+
     // MARK: - Text tool
 
     enum StageTool { case selection, text }
-    struct TextPlacementRef: Equatable { let layerID: UUID; let keyframe: Int }
+    struct TextPlacementRef: Equatable {
+        let layerID: UUID; let keyframe: Int
+        /// Undo-coalescing key (see `withUndoSnapshot`) — edits to the same
+        /// placement collapse into one undo step regardless of which field
+        /// changed (typing, dragging, a color pick), so a burst of edits to
+        /// one text box reads as a single Cmd+Z instead of one per keystroke.
+        var undoToken: String { "placement:\(layerID)-\(keyframe)" }
+    }
 
     var selectedTool: StageTool = .selection
     var selectedPlacement: TextPlacementRef?
+
+    // MARK: - Onion skinning
+    //
+    // A Stage-only editing aid — ghosted nearby-frame content — not part of
+    // the saved document (same as selectedTool/webExportSheetPresented) and
+    // deliberately never rendered by StageContentView, the piece GIF export
+    // shares with the live preview (see StageView.OnionSkinOverlay's own
+    // doc comment): a ghost frame must never leak into exported output.
+    var onionSkinEnabled: Bool = false
+    // How many frames before/after the playhead to ghost — Flash's own
+    // onion markers are draggable on the ruler; a fixed symmetric range
+    // with a small adjustable count is the scoped-down equivalent here.
+    var onionSkinRange: Int = 2
 
     /// Places a new default text box on `selectedLayer` at the keyframe that
     /// governs `selectedFrame`, and selects it. Mirrors the Actions panel's
@@ -298,24 +339,34 @@ final class TimelineDocument {
             logToConsole("Select or insert a keyframe on \"\(layer.name)\" before placing text.", level: .warn)
             return
         }
-        let placement = PlacedText(x: point.x, y: point.y)
-        layer.textFrames[kf] = placement
-        selectedPlacement = TextPlacementRef(layerID: layer.id, keyframe: kf)
+        withUndoSnapshot {
+            let placement = PlacedText(x: point.x, y: point.y)
+            layer.textFrames[kf] = placement
+            selectedPlacement = TextPlacementRef(layerID: layer.id, keyframe: kf)
+        }
     }
 
     func deleteSelectedPlacement() {
         guard let ref = selectedPlacement, let layer = layers.first(where: { $0.id == ref.layerID }) else { return }
-        layer.textFrames[ref.keyframe] = nil
-        selectedPlacement = nil
+        withUndoSnapshot {
+            layer.textFrames[ref.keyframe] = nil
+            selectedPlacement = nil
+        }
     }
 
     /// A read/write binding straight into the owning layer's dictionary —
-    /// same idiom as CodeEditorPanel.scriptBinding(for:).
+    /// same idiom as CodeEditorPanel.scriptBinding(for:). Writes are
+    /// undo-coalesced per placement (see `TextPlacementRef.undoToken`), so
+    /// this one setter is what makes every Properties-panel field and both
+    /// Stage drag gestures on placed text undoable without each needing
+    /// its own snapshot call.
     func binding(for ref: TextPlacementRef) -> Binding<PlacedText>? {
         guard let layer = layers.first(where: { $0.id == ref.layerID }) else { return nil }
         return Binding(
             get: { layer.textFrames[ref.keyframe] ?? PlacedText(x: 0, y: 0) },
-            set: { layer.textFrames[ref.keyframe] = $0 }
+            set: { newValue in
+                self.withUndoSnapshot(coalesce: ref.undoToken) { layer.textFrames[ref.keyframe] = newValue }
+            }
         )
     }
 
@@ -327,6 +378,41 @@ final class TimelineDocument {
         guard let ref = selectedPlacement, let binding = binding(for: ref) else { return }
         binding.wrappedValue.x += dx
         binding.wrappedValue.y += dy
+    }
+
+    // MARK: - Frame labels
+
+    /// A read/write binding onto a keyframe's label — same idiom as
+    /// `binding(for:)`/`CodeEditorPanel.scriptBinding(for:)`. Empty string
+    /// clears the label (matching how an empty script/text field would
+    /// mean "nothing here"), rather than storing `""` as a real label.
+    func labelBinding(layer: TLLayer, at frame: Int) -> Binding<String> {
+        Binding(
+            get: { layer.frameLabels[frame] ?? "" },
+            set: { newValue in
+                self.withUndoSnapshot(coalesce: "label:\(layer.id)-\(frame)") {
+                    layer.frameLabels[frame] = newValue.isEmpty ? nil : newValue
+                }
+            }
+        )
+    }
+
+    /// The frame carrying `label`, searched across every layer in document
+    /// order — what `gotoAndPlay("label")`/`gotoAndStop`/`goto` resolve
+    /// against (see makeJSContext below and player.js's `resolveFrame`,
+    /// which must stay in lockstep with this). nil if no keyframe anywhere
+    /// has that exact label.
+    func frame(forLabel label: String) -> Int? {
+        for layer in layers {
+            // Dictionary iteration order is unspecified — sort so a layer
+            // with (rare) duplicate labels resolves to its earliest frame,
+            // deterministically, rather than whichever the hash table
+            // happens to visit first.
+            if let match = layer.frameLabels.sorted(by: { $0.key < $1.key }).first(where: { $0.value == label }) {
+                return match.key
+            }
+        }
+        return nil
     }
 
     // MARK: - Copy/paste placed text
@@ -345,15 +431,80 @@ final class TimelineDocument {
     /// between the two keyframes.
     func pastePlacedText(layer: TLLayer, at frame: Int) {
         guard let copied = copiedPlacedText else { return }
-        let kf: Int
-        if let existing = layer.governingKeyframe(at: frame), existing == frame {
-            kf = existing
-        } else {
-            insertKeyframe(layer: layer, at: frame, blank: false)
-            kf = frame
+        withUndoSnapshot {
+            let kf: Int
+            if let existing = layer.governingKeyframe(at: frame), existing == frame {
+                kf = existing
+            } else {
+                insertKeyframe(layer: layer, at: frame, blank: false)
+                kf = frame
+            }
+            layer.textFrames[kf] = copied
+            selectedPlacement = TextPlacementRef(layerID: layer.id, keyframe: kf)
         }
-        layer.textFrames[kf] = copied
-        selectedPlacement = TextPlacementRef(layerID: layer.id, keyframe: kf)
+    }
+
+    // MARK: - Copy/paste frames
+    //
+    // Whole-span copy — every frame mark plus whatever content (script,
+    // placed text, tween settings, label) each one carries, unlike
+    // Copy/Paste Text above which only ever touches one placed text box.
+    // Stored relative to the copied range's start, so paste can land
+    // anywhere and reproduce the same shape.
+
+    private struct CopiedFrames {
+        let marks: [FrameMark]
+        let scripts: [Int: String]
+        let textFrames: [Int: PlacedText]
+        let tweenSettings: [Int: TweenSettings]
+        let colorTweenSettings: [Int: TweenSettings]
+        let labels: [Int: String]
+    }
+
+    @ObservationIgnored private var copiedFrames: CopiedFrames?
+
+    var hasCopiedFrames: Bool { copiedFrames != nil }
+
+    func copySelectedFrames() {
+        guard let layer = selectedLayer else { return }
+        let range = selectedFrameRange
+        var marks: [FrameMark] = []
+        var scripts: [Int: String] = [:]
+        var textFrames: [Int: PlacedText] = [:]
+        var tweenSettings: [Int: TweenSettings] = [:]
+        var colorTweenSettings: [Int: TweenSettings] = [:]
+        var labels: [Int: String] = [:]
+        for (offset, frame) in range.enumerated() {
+            marks.append(frame - 1 < layer.frames.count ? layer.frames[frame - 1] : .empty)
+            if let v = layer.frameScripts[frame] { scripts[offset] = v }
+            if let v = layer.textFrames[frame] { textFrames[offset] = v }
+            if let v = layer.tweenSettings[frame] { tweenSettings[offset] = v }
+            if let v = layer.colorTweenSettings[frame] { colorTweenSettings[offset] = v }
+            if let v = layer.frameLabels[frame] { labels[offset] = v }
+        }
+        copiedFrames = CopiedFrames(
+            marks: marks, scripts: scripts, textFrames: textFrames,
+            tweenSettings: tweenSettings, colorTweenSettings: colorTweenSettings, labels: labels
+        )
+    }
+
+    /// Pastes the copied span starting at `startFrame` on `layer`, growing
+    /// capacity to fit and overwriting whatever was already there —
+    /// matching Flash's own Paste Frames, which replaces rather than
+    /// inserts/shifts.
+    func pasteFrames(layer: TLLayer, at startFrame: Int) {
+        guard let copied = copiedFrames, !copied.marks.isEmpty else { return }
+        withUndoSnapshot {
+            growCapacity(to: max(totalFrames, startFrame + copied.marks.count - 1))
+            for (offset, mark) in copied.marks.enumerated() {
+                layer.frames[startFrame + offset - 1] = mark
+            }
+            for (offset, v) in copied.scripts { layer.frameScripts[startFrame + offset] = v }
+            for (offset, v) in copied.textFrames { layer.textFrames[startFrame + offset] = v }
+            for (offset, v) in copied.tweenSettings { layer.tweenSettings[startFrame + offset] = v }
+            for (offset, v) in copied.colorTweenSettings { layer.colorTweenSettings[startFrame + offset] = v }
+            for (offset, v) in copied.labels { layer.frameLabels[startFrame + offset] = v }
+        }
     }
 
     // MARK: - Motion tween
@@ -371,26 +522,28 @@ final class TimelineDocument {
             logToConsole("Create Tween needs a keyframe with placed text at the start of the range.", level: .warn)
             return
         }
-        if !layer.isKeyframe(at: hi) {
-            insertKeyframe(layer: layer, at: hi, blank: false)
-        }
-        if layer.textFrames[hi] == nil {
-            layer.textFrames[hi] = layer.textFrames[lo]
-        }
-        growCapacity(to: max(totalFrames, hi))
-        for f in (lo + 1)..<hi {
-            layer.frames[f - 1] = .tween
-        }
-        // Drop the range highlight — otherwise every cell's selection
-        // border stays drawn on top of the tween band, reading as a grid
-        // instead of the smooth lavender span with a single arrow.
-        selectedFrame = lo
-        rangeSelectionEnd = nil
-        if layer.tweenSettings[lo] == nil {
-            layer.tweenSettings[lo] = TweenSettings()
-        }
-        if layer.colorTweenSettings[lo] == nil {
-            layer.colorTweenSettings[lo] = TweenSettings()
+        withUndoSnapshot {
+            if !layer.isKeyframe(at: hi) {
+                insertKeyframe(layer: layer, at: hi, blank: false)
+            }
+            if layer.textFrames[hi] == nil {
+                layer.textFrames[hi] = layer.textFrames[lo]
+            }
+            growCapacity(to: max(totalFrames, hi))
+            for f in (lo + 1)..<hi {
+                layer.frames[f - 1] = .tween
+            }
+            // Drop the range highlight — otherwise every cell's selection
+            // border stays drawn on top of the tween band, reading as a grid
+            // instead of the smooth lavender span with a single arrow.
+            selectedFrame = lo
+            rangeSelectionEnd = nil
+            if layer.tweenSettings[lo] == nil {
+                layer.tweenSettings[lo] = TweenSettings()
+            }
+            if layer.colorTweenSettings[lo] == nil {
+                layer.colorTweenSettings[lo] = TweenSettings()
+            }
         }
     }
 
@@ -409,29 +562,54 @@ final class TimelineDocument {
               layer.tweenTarget(from: start) == oldEnd,
               newEnd > start + 1 else { return }
 
-        growCapacity(to: max(totalFrames, newEnd))
-        let movedText = layer.textFrames[oldEnd]
-        let movedScript = layer.frameScripts[oldEnd]
-        layer.textFrames[oldEnd] = nil
-        layer.frameScripts[oldEnd] = nil
+        withUndoSnapshot {
+            growCapacity(to: max(totalFrames, newEnd))
+            let movedText = layer.textFrames[oldEnd]
+            let movedScript = layer.frameScripts[oldEnd]
+            layer.textFrames[oldEnd] = nil
+            layer.frameScripts[oldEnd] = nil
 
-        if newEnd > oldEnd {
-            for f in oldEnd...(newEnd - 1) { layer.frames[f - 1] = .tween }
-        } else {
-            for f in (newEnd + 1)...oldEnd { layer.frames[f - 1] = .empty }
+            if newEnd > oldEnd {
+                for f in oldEnd...(newEnd - 1) { layer.frames[f - 1] = .tween }
+            } else {
+                for f in (newEnd + 1)...oldEnd { layer.frames[f - 1] = .empty }
+            }
+            layer.textFrames[newEnd] = movedText
+            layer.frameScripts[newEnd] = movedScript
+            layer.frames[newEnd - 1] = .keyframe(hasScript: !(movedScript ?? "").isEmpty)
+
+            if selectedFrame == oldEnd { selectedFrame = newEnd }
         }
-        layer.textFrames[newEnd] = movedText
-        layer.frameScripts[newEnd] = movedScript
-        layer.frames[newEnd - 1] = .keyframe(hasScript: !(movedScript ?? "").isEmpty)
+    }
 
-        if selectedFrame == oldEnd { selectedFrame = newEnd }
+    /// Reverts a tween span back to plain frames, keeping both keyframes
+    /// and their content intact — unlike Clear Frame, which wipes the frame
+    /// (and its content) entirely. A no-op if `frame` isn't governed by an
+    /// active tween.
+    func removeTween(layer: TLLayer, at frame: Int) {
+        guard let start = layer.governingKeyframe(at: frame), let end = layer.tweenTarget(from: start) else { return }
+        withUndoSnapshot {
+            for f in (start + 1)..<end {
+                layer.frames[f - 1] = .plain
+            }
+            layer.tweenSettings[start] = nil
+            layer.colorTweenSettings[start] = nil
+        }
     }
 
     /// The tween span (if any) that governs `selectedFrame` on
     /// `selectedLayerID` — what the Properties panel's Tween section binds
     /// to. Distinct from `selectedPlacement`: this tracks a timeline frame
     /// selection, not a stage object selection, so both can be shown at once.
-    struct TweenRef: Equatable { let layerID: UUID; let startFrame: Int }
+    struct TweenRef: Equatable {
+        let layerID: UUID; let startFrame: Int
+        // Position/size tweening and color-effect tweening are independent
+        // curves on the same span (see TLLayer.colorTweenSettings) — kept
+        // as separate coalescing keys so dragging the "Amount" slider in
+        // one doesn't merge into the other's undo step.
+        var undoToken: String { "tween:\(layerID)-\(startFrame)" }
+        var colorUndoToken: String { "colortween:\(layerID)-\(startFrame)" }
+    }
 
     var activeTweenRef: TweenRef? {
         guard let id = selectedLayerID, let layer = layers.first(where: { $0.id == id }) else { return nil }
@@ -443,7 +621,9 @@ final class TimelineDocument {
         guard let layer = layers.first(where: { $0.id == ref.layerID }) else { return nil }
         return Binding(
             get: { layer.tweenSettings[ref.startFrame] ?? TweenSettings() },
-            set: { layer.tweenSettings[ref.startFrame] = $0 }
+            set: { newValue in
+                self.withUndoSnapshot(coalesce: ref.undoToken) { layer.tweenSettings[ref.startFrame] = newValue }
+            }
         )
     }
 
@@ -453,7 +633,9 @@ final class TimelineDocument {
         guard let layer = layers.first(where: { $0.id == ref.layerID }) else { return nil }
         return Binding(
             get: { layer.colorTweenSettings[ref.startFrame] ?? TweenSettings() },
-            set: { layer.colorTweenSettings[ref.startFrame] = $0 }
+            set: { newValue in
+                self.withUndoSnapshot(coalesce: ref.colorUndoToken) { layer.colorTweenSettings[ref.startFrame] = newValue }
+            }
         )
     }
 
@@ -579,6 +761,23 @@ final class TimelineDocument {
     /// this document's runtime lifetime — see preprocessForReentry below.
     @ObservationIgnored private var declaredTopLevelBindings: Set<String> = []
 
+    /// Resolves a `gotoAndStop`/`gotoAndPlay`/`goto` argument, which
+    /// JavaScript's dynamic typing lets be either a frame number or a frame
+    /// label string. nil (a no-op navigation) on an unrecognized label —
+    /// logged as a console warning, same as the other guard-based
+    /// navigation misses in this file, rather than silently doing nothing.
+    private func resolveFrameArgument(_ value: JSValue) -> Int? {
+        if value.isString, let label = value.toString() {
+            guard let frame = frame(forLabel: label) else {
+                logToConsole("No frame labeled \"\(label)\".", level: .warn)
+                return nil
+            }
+            return frame
+        }
+        guard value.isNumber else { return nil }
+        return Int(value.toInt32())
+    }
+
     private func makeJSContext() -> JSContext {
         let ctx = JSContext()!
         let stopFn: @convention(block) () -> Void = { [weak self] in
@@ -589,15 +788,18 @@ final class TimelineDocument {
         }
         // These are the versions frame scripts call — unlike the UI's
         // gotoAndStop/gotoAndPlay above, navigating from script code DOES
-        // run the destination frame's actions, matching ActionScript.
-        let jsGotoAndStop: @convention(block) (Int) -> Void = { [weak self] frame in
-            guard let self else { return }
+        // run the destination frame's actions, matching ActionScript. Each
+        // accepts either a frame number or a frame label (see
+        // resolveFrameArgument) — JSValue rather than Int so JavaScript's
+        // dynamic typing can hand us either.
+        let jsGotoAndStop: @convention(block) (JSValue) -> Void = { [weak self] arg in
+            guard let self, let frame = self.resolveFrameArgument(arg) else { return }
             self.stop()
             self.playhead = min(max(frame, 1), self.totalFrames)
             self.runScriptsOnCurrentFrame()
         }
-        let jsGotoAndPlay: @convention(block) (Int) -> Void = { [weak self] frame in
-            guard let self else { return }
+        let jsGotoAndPlay: @convention(block) (JSValue) -> Void = { [weak self] arg in
+            guard let self, let frame = self.resolveFrameArgument(arg) else { return }
             self.playhead = min(max(frame, 1), self.totalFrames)
             self.play()
         }
@@ -607,8 +809,8 @@ final class TimelineDocument {
         // than raw document capacity, so an out-of-range call (0, negative,
         // or past the last real keyframe) lands on a valid frame instead of
         // shipping straight to frame 0/blank space.
-        let jsGoto: @convention(block) (Int) -> Void = { [weak self] frame in
-            guard let self else { return }
+        let jsGoto: @convention(block) (JSValue) -> Void = { [weak self] arg in
+            guard let self, let frame = self.resolveFrameArgument(arg) else { return }
             self.playhead = min(max(frame, 1), self.contentLength)
             self.runScriptsOnCurrentFrame()
         }
@@ -917,24 +1119,28 @@ final class TimelineDocument {
     func indexOf(_ id: UUID) -> Int? { layers.firstIndex { $0.id == id } }
 
     func addLayer() {
-        let indent = selectedLayerID.flatMap { id in layers.first { $0.id == id }?.indent } ?? 0
-        let insertAt = selectedLayerID.flatMap(indexOf) ?? 0
-        let newLayer = TLLayer(
-            name: "Layer \(layers.count + 1)", swatch: .green, indent: indent,
-            frames: [.emptyKeyframe] + Array(repeating: .empty, count: max(0, totalFrames - 1))
-        )
-        layers.insert(newLayer, at: min(insertAt, layers.count))
-        selectedLayerID = newLayer.id
+        withUndoSnapshot {
+            let indent = selectedLayerID.flatMap { id in layers.first { $0.id == id }?.indent } ?? 0
+            let insertAt = selectedLayerID.flatMap(indexOf) ?? 0
+            let newLayer = TLLayer(
+                name: "Layer \(layers.count + 1)", swatch: .green, indent: indent,
+                frames: [.emptyKeyframe] + Array(repeating: .empty, count: max(0, totalFrames - 1))
+            )
+            layers.insert(newLayer, at: min(insertAt, layers.count))
+            selectedLayerID = newLayer.id
+        }
     }
 
     func addFolder() {
-        let insertAt = selectedLayerID.flatMap(indexOf) ?? 0
-        let newFolder = TLLayer(
-            name: "Folder \(layers.count + 1)", swatch: .cyan, kind: .folder,
-            frames: Array(repeating: .empty, count: totalFrames)
-        )
-        layers.insert(newFolder, at: min(insertAt, layers.count))
-        selectedLayerID = newFolder.id
+        withUndoSnapshot {
+            let insertAt = selectedLayerID.flatMap(indexOf) ?? 0
+            let newFolder = TLLayer(
+                name: "Folder \(layers.count + 1)", swatch: .cyan, kind: .folder,
+                frames: Array(repeating: .empty, count: totalFrames)
+            )
+            layers.insert(newFolder, at: min(insertAt, layers.count))
+            selectedLayerID = newFolder.id
+        }
     }
 
     func deleteSelectedLayer() {
@@ -944,9 +1150,11 @@ final class TimelineDocument {
 
     func deleteLayer(_ layer: TLLayer) {
         guard let idx = indexOf(layer.id) else { return }
-        layers.remove(at: idx)
-        if selectedLayerID == layer.id {
-            selectedLayerID = layers.indices.contains(idx) ? layers[idx].id : layers.last?.id
+        withUndoSnapshot {
+            layers.remove(at: idx)
+            if selectedLayerID == layer.id {
+                selectedLayerID = layers.indices.contains(idx) ? layers[idx].id : layers.last?.id
+            }
         }
     }
 
@@ -981,11 +1189,13 @@ final class TimelineDocument {
     /// marks the frame as continuing prior content rather than shifting
     /// everything after it, since frames don't carry real content yet.)
     func insertFrame(layer: TLLayer, at frame: Int) {
-        growCapacity(to: max(totalFrames, frame))
-        let idx = frame - 1
-        guard layer.frames.indices.contains(idx), layer.frames[idx] == .empty else { return }
-        extendSpan(layer: layer, upTo: frame)
-        if layer.frames[idx] == .empty { layer.frames[idx] = .plain } // no preceding keyframe to bridge from
+        withUndoSnapshot {
+            growCapacity(to: max(totalFrames, frame))
+            let idx = frame - 1
+            guard layer.frames.indices.contains(idx), layer.frames[idx] == .empty else { return }
+            extendSpan(layer: layer, upTo: frame)
+            if layer.frames[idx] == .empty { layer.frames[idx] = .plain } // no preceding keyframe to bridge from
+        }
     }
 
     /// F6 (keyframe) / F7 (blank keyframe) in classic Flash. A non-blank
@@ -999,16 +1209,18 @@ final class TimelineDocument {
     /// exactly how Flash lets you "freeze" an in-between position into its
     /// own keyframe.
     func insertKeyframe(layer: TLLayer, at frame: Int, blank: Bool) {
-        growCapacity(to: max(totalFrames, frame))
-        let idx = frame - 1
-        guard layer.frames.indices.contains(idx) else { return }
-        if !blank {
-            extendSpan(layer: layer, upTo: frame)
-            if layer.textFrames[frame] == nil, let snapshot = layer.interpolatedPlacedText(at: frame) {
-                layer.textFrames[frame] = snapshot
+        withUndoSnapshot {
+            growCapacity(to: max(totalFrames, frame))
+            let idx = frame - 1
+            guard layer.frames.indices.contains(idx) else { return }
+            if !blank {
+                extendSpan(layer: layer, upTo: frame)
+                if layer.textFrames[frame] == nil, let snapshot = layer.interpolatedPlacedText(at: frame) {
+                    layer.textFrames[frame] = snapshot
+                }
             }
+            layer.frames[idx] = blank ? .emptyKeyframe : .keyframe(hasScript: !(layer.frameScripts[frame] ?? "").isEmpty)
         }
-        layer.frames[idx] = blank ? .emptyKeyframe : .keyframe(hasScript: !(layer.frameScripts[frame] ?? "").isEmpty)
     }
 
     /// Shift+F5 in classic Flash — removes frames. Removing a keyframe that
@@ -1021,18 +1233,21 @@ final class TimelineDocument {
         let idx = frame - 1
         guard layer.frames.indices.contains(idx) else { return }
 
-        if layer.isKeyframe(at: frame), frame > 1,
-           let incomingStart = layer.governingKeyframe(at: frame - 1),
-           layer.tweenTarget(from: incomingStart) == frame,
-           layer.tweenTarget(from: frame) != nil {
-            layer.frames[idx] = .tween
-        } else {
-            layer.frames[idx] = .empty
+        withUndoSnapshot {
+            if layer.isKeyframe(at: frame), frame > 1,
+               let incomingStart = layer.governingKeyframe(at: frame - 1),
+               layer.tweenTarget(from: incomingStart) == frame,
+               layer.tweenTarget(from: frame) != nil {
+                layer.frames[idx] = .tween
+            } else {
+                layer.frames[idx] = .empty
+            }
+            layer.frameScripts[frame] = nil
+            layer.textFrames[frame] = nil
+            layer.tweenSettings[frame] = nil
+            layer.colorTweenSettings[frame] = nil
+            layer.frameLabels[frame] = nil
         }
-        layer.frameScripts[frame] = nil
-        layer.textFrames[frame] = nil
-        layer.tweenSettings[frame] = nil
-        layer.colorTweenSettings[frame] = nil
     }
 
     func setScript(_ text: String, layer: TLLayer, at frame: Int) {
@@ -1070,26 +1285,30 @@ final class TimelineDocument {
     /// an indent-0 row) or into one (drop next to a child row).
     func moveLayer(id: UUID, beforeLayerID: UUID?, indent: Int) {
         guard let from = indexOf(id) else { return }
-        let item = layers.remove(at: from)
-        item.indent = indent
-        if let beforeID = beforeLayerID, let targetIdx = layers.firstIndex(where: { $0.id == beforeID }) {
-            layers.insert(item, at: targetIdx)
-        } else {
-            layers.append(item)
+        withUndoSnapshot {
+            let item = layers.remove(at: from)
+            item.indent = indent
+            if let beforeID = beforeLayerID, let targetIdx = layers.firstIndex(where: { $0.id == beforeID }) {
+                layers.insert(item, at: targetIdx)
+            } else {
+                layers.append(item)
+            }
         }
     }
 
     /// Drops `id` inside `folder` as its first child.
     func reparent(id: UUID, intoFolder folder: TLLayer) {
         guard id != folder.id, let from = indexOf(id) else { return }
-        let item = layers.remove(at: from)
-        item.indent = folder.indent + 1
-        if let folderIdx = layers.firstIndex(where: { $0.id == folder.id }) {
-            layers.insert(item, at: folderIdx + 1)
-        } else {
-            layers.append(item)
+        withUndoSnapshot {
+            let item = layers.remove(at: from)
+            item.indent = folder.indent + 1
+            if let folderIdx = layers.firstIndex(where: { $0.id == folder.id }) {
+                layers.insert(item, at: folderIdx + 1)
+            } else {
+                layers.append(item)
+            }
+            folder.expanded = true
         }
-        folder.expanded = true
     }
 
     static func sample() -> TimelineDocument {

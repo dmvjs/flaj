@@ -40,4 +40,4 @@ File → Export GIF… simulates the whole timeline frame by frame and writes it
 
 ## Format
 
-`.flaj` files are plain JSON — layers, frame marks, scripts, placed text, tween settings. Older files missing newer fields still open.
+`.flaj` files are plain JSON — layers, frame marks, scripts, placed text, tween settings, frame labels. Older files missing newer fields still open.

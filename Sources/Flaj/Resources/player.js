@@ -318,7 +318,24 @@
     }).join('\n');
   }
 
+  // Flash's "named anchor" convention: a frame label starting with "#"
+  // updates the page's URL fragment when reached, making it a real
+  // back/forward-navigable browser history entry and a valid deep link —
+  // see the location.hash bootstrap check at the bottom of this file for
+  // the read side. Runs once per frame actually entered (this function's
+  // one call site per navigation path), never mid-tween.
+  function updateNamedAnchor() {
+    for (const layer of doc.layers) {
+      const label = (layer.frameLabels || {})[playhead];
+      if (label && label.charAt(0) === '#' && location.hash !== label) {
+        location.hash = label;
+        return;
+      }
+    }
+  }
+
   function runScriptsOnCurrentFrame() {
+    updateNamedAnchor();
     for (const layer of doc.layers) {
       if (!isKeyframe(layer.frames, playhead)) continue;
       const script = layer.frameScripts[playhead];
@@ -392,7 +409,37 @@
     if (rafHandle == null) rafHandle = requestAnimationFrame(loop);
   }
 
-  function gotoAndStop(frame) {
+  // Searches every layer's frameLabels in document order, earliest frame
+  // first within a layer, for a deterministic result even if a label is
+  // (unusually) duplicated. Silent on a miss — callers that mean to warn
+  // (resolveFrame below) do that themselves; the deep-link bootstrap at the
+  // bottom of this file deliberately doesn't, since an unrelated URL
+  // fragment shouldn't spam a warning on every ordinary page load.
+  function findLabeledFrame(label) {
+    for (const layer of doc.layers) {
+      const labels = layer.frameLabels || {};
+      const frame = Object.keys(labels)
+        .map(Number)
+        .sort((a, b) => a - b)
+        .find(f => labels[f] === label);
+      if (frame != null) return frame;
+    }
+    return null;
+  }
+
+  // gotoAndStop/gotoAndPlay/goto accept either a frame number or a frame
+  // label (mirrors TimelineDocument.resolveFrameArgument in
+  // TimelineModel.swift — keep both in lockstep).
+  function resolveFrame(target) {
+    if (typeof target !== 'string') return target;
+    const frame = findLabeledFrame(target);
+    if (frame == null) console.warn(`No frame labeled "${target}".`);
+    return frame;
+  }
+
+  function gotoAndStop(target) {
+    const frame = resolveFrame(target);
+    if (frame == null) return;
     stop();
     playhead = clamp(frame, 1, totalFrames);
     frameOriginTime = null;
@@ -401,13 +448,17 @@
     renderStageObjects();
   }
 
-  function gotoAndPlay(frame) {
+  function gotoAndPlay(target) {
+    const frame = resolveFrame(target);
+    if (frame == null) return;
     playhead = clamp(frame, 1, totalFrames);
     frameOriginTime = null;
     play();
   }
 
-  function goto(frame) {
+  function goto(target) {
+    const frame = resolveFrame(target);
+    if (frame == null) return;
     playhead = clamp(frame, 1, contentLength());
     frameOriginTime = null;
     runScriptsOnCurrentFrame();
@@ -549,5 +600,17 @@
   stageEl.style.width = stageWidth + 'px';
   stageEl.style.height = stageHeight + 'px';
   fitStageToViewport(); // synchronous first fit — ResizeObserver's own initial callback is async and would otherwise flash unscaled content for a frame
+
+  // Deep-linking: opening the page with a URL fragment matching a named
+  // anchor (a "#"-prefixed frame label) starts there instead of frame 1 —
+  // the read side of the named-anchor convention (see updateNamedAnchor).
+  // Silent, not resolveFrame, if it doesn't match: plenty of pages arrive
+  // with an unrelated hash (an analytics fragment, a host page's own
+  // anchor) that was never meant as a Flaj frame reference.
+  if (location.hash) {
+    const startFrame = findLabeledFrame(location.hash);
+    if (startFrame != null) playhead = clamp(startFrame, 1, totalFrames);
+  }
+
   play();
 })();

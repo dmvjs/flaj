@@ -134,13 +134,13 @@ struct WebExportSettingsSheet: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("PAGE TITLE").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
-                TextField("Untitled", text: $doc.webExportTitle)
+                TextField("Untitled", text: doc.undoableBinding(\.webExportTitle, coalesce: "webExportTitle"))
                     .textFieldStyle(.roundedBorder)
             }
             HStack(alignment: .top, spacing: 16) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("FIT").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
-                    Picker("", selection: $doc.webExportFit) {
+                    Picker("", selection: doc.undoableBinding(\.webExportFit)) {
                         ForEach(StageFit.allCases, id: \.self) { fit in
                             Text(fit.label).tag(fit)
                         }
@@ -151,7 +151,7 @@ struct WebExportSettingsSheet: View {
                 }
                 VStack(alignment: .leading, spacing: 4) {
                     Text("POSITION").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
-                    StageAlignmentGrid(selection: $doc.webExportAlignment)
+                    StageAlignmentGrid(selection: doc.undoableBinding(\.webExportAlignment))
                 }
             }
             HStack(spacing: 16) {
@@ -161,10 +161,10 @@ struct WebExportSettingsSheet: View {
                     // what shows in any letterboxing, or through a
                     // transparent Stage. Opacity is included in the swatch,
                     // so dragging it to 0 is how you get "transparent".
-                    ColorPicker("", selection: $doc.webExportPageBackground, supportsOpacity: true)
+                    ColorPicker("", selection: doc.undoableBinding(\.webExportPageBackground, coalesce: "webExportPageBackground"), supportsOpacity: true)
                         .labelsHidden()
                 }
-                Toggle("Minify JS", isOn: $doc.webExportMinify)
+                Toggle("Minify JS", isOn: doc.undoableBinding(\.webExportMinify))
                     .toggleStyle(.checkbox)
                     .font(.system(size: 11))
             }

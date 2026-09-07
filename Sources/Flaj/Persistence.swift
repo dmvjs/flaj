@@ -64,6 +64,14 @@ struct FlajDocumentFile: Codable {
 }
 
 struct FlajLayerFile: Codable {
+    // Not user-visible, not meaningful across separate documents — purely
+    // so a layer's identity survives a round trip through this struct
+    // (undo/redo rebuilds `layers` from one of these snapshots; without a
+    // stable id, every undo would also silently drop the current layer/
+    // text/tween selection, since TLLayer.id is otherwise freshly
+    // generated per instance). Defaults to a fresh UUID on decode so
+    // pre-existing .flaj files without this field still open.
+    var id: UUID
     var name: String
     var swatchHex: String
     var kind: LayerKind
@@ -76,15 +84,17 @@ struct FlajLayerFile: Codable {
     var textFrames: [Int: PlacedText]
     var tweenSettings: [Int: TweenSettings]
     var colorTweenSettings: [Int: TweenSettings]
+    var frameLabels: [Int: String]
 
     private enum CodingKeys: String, CodingKey {
-        case name, swatchHex, kind, indent, locked, hidden, expanded, frames, frameScripts, textFrames,
-             tweenSettings, colorTweenSettings
+        case id, name, swatchHex, kind, indent, locked, hidden, expanded, frames, frameScripts, textFrames,
+             tweenSettings, colorTweenSettings, frameLabels
     }
 
-    init(name: String, swatchHex: String, kind: LayerKind, indent: Int, locked: Bool, hidden: Bool,
+    init(id: UUID = UUID(), name: String, swatchHex: String, kind: LayerKind, indent: Int, locked: Bool, hidden: Bool,
          expanded: Bool, frames: [FrameMark], frameScripts: [Int: String], textFrames: [Int: PlacedText],
-         tweenSettings: [Int: TweenSettings], colorTweenSettings: [Int: TweenSettings]) {
+         tweenSettings: [Int: TweenSettings], colorTweenSettings: [Int: TweenSettings], frameLabels: [Int: String] = [:]) {
+        self.id = id
         self.name = name
         self.swatchHex = swatchHex
         self.kind = kind
@@ -97,12 +107,14 @@ struct FlajLayerFile: Codable {
         self.textFrames = textFrames
         self.tweenSettings = tweenSettings
         self.colorTweenSettings = colorTweenSettings
+        self.frameLabels = frameLabels
     }
 
-    // Custom decode so .flaj files saved before textFrames/tweenSettings/
-    // colorTweenSettings existed still open.
+    // Custom decode so .flaj files saved before id/textFrames/tweenSettings/
+    // colorTweenSettings/frameLabels existed still open.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         name = try c.decode(String.self, forKey: .name)
         swatchHex = try c.decode(String.self, forKey: .swatchHex)
         kind = try c.decode(LayerKind.self, forKey: .kind)
@@ -115,6 +127,7 @@ struct FlajLayerFile: Codable {
         textFrames = try c.decodeIfPresent([Int: PlacedText].self, forKey: .textFrames) ?? [:]
         tweenSettings = try c.decodeIfPresent([Int: TweenSettings].self, forKey: .tweenSettings) ?? [:]
         colorTweenSettings = try c.decodeIfPresent([Int: TweenSettings].self, forKey: .colorTweenSettings) ?? [:]
+        frameLabels = try c.decodeIfPresent([Int: String].self, forKey: .frameLabels) ?? [:]
     }
 }
 
@@ -178,17 +191,23 @@ extension TimelineDocument {
             webExportMinify: webExportMinify,
             layers: layers.map { layer in
                 FlajLayerFile(
-                    name: layer.name, swatchHex: layer.swatch.hexString, kind: layer.kind,
+                    id: layer.id, name: layer.name, swatchHex: layer.swatch.hexString, kind: layer.kind,
                     indent: layer.indent, locked: layer.locked, hidden: layer.hidden,
                     expanded: layer.expanded, frames: layer.frames, frameScripts: layer.frameScripts,
                     textFrames: layer.textFrames, tweenSettings: layer.tweenSettings,
-                    colorTweenSettings: layer.colorTweenSettings
+                    colorTweenSettings: layer.colorTweenSettings, frameLabels: layer.frameLabels
                 )
             }
         )
     }
 
-    func load(from file: FlajDocumentFile) {
+    /// Restores every field `FlajDocumentFile` captures. Shared by
+    /// `load(from:)` (opening a file — also resets playhead/selection/
+    /// console, below) and undo/redo (`Undo.swift`), which instead leave
+    /// that transient state alone and just re-resolve it against the new
+    /// `layers` array, since undoing a small edit shouldn't also yank the
+    /// playhead back to frame 1 or drop the current selection.
+    func applySaveFile(_ file: FlajDocumentFile) {
         stop()
         resetRuntime()
         totalFrames = file.totalFrames
@@ -203,7 +222,7 @@ extension TimelineDocument {
         webExportMinify = file.webExportMinify
         layers = file.layers.map { lf in
             let layer = TLLayer(
-                name: lf.name, swatch: Color(hex: lf.swatchHex), kind: lf.kind, indent: lf.indent,
+                id: lf.id, name: lf.name, swatch: Color(hex: lf.swatchHex), kind: lf.kind, indent: lf.indent,
                 locked: lf.locked, hidden: lf.hidden, frames: lf.frames
             )
             layer.expanded = lf.expanded
@@ -211,8 +230,13 @@ extension TimelineDocument {
             layer.textFrames = lf.textFrames
             layer.tweenSettings = lf.tweenSettings
             layer.colorTweenSettings = lf.colorTweenSettings
+            layer.frameLabels = lf.frameLabels
             return layer
         }
+    }
+
+    func load(from file: FlajDocumentFile) {
+        applySaveFile(file)
         selectedLayerID = layers.first?.id
         playhead = 1
         selectedFrame = 1

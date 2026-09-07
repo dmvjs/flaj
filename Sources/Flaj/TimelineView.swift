@@ -153,16 +153,33 @@ struct TimelineView: View {
 
                 HStack(spacing: 8) {
                     Text("Background:").font(.system(size: 11)).foregroundStyle(.secondary)
-                    ColorPicker("", selection: $doc.stageColor).labelsHidden()
+                    ColorPicker("", selection: doc.undoableBinding(\.stageColor, coalesce: "stageColor")).labelsHidden()
                 }
 
                 HStack(spacing: 6) {
                     Text("Frame rate:").font(.system(size: 11)).foregroundStyle(.secondary)
                     HStack(spacing: 4) {
-                        TextField("", value: $doc.fps, formatter: Self.fpsFormatter)
+                        TextField("", value: doc.undoableBinding(\.fps, coalesce: "fps"), formatter: Self.fpsFormatter)
                             .frame(width: 34)
                             .textFieldStyle(.roundedBorder)
                         Text("fps").font(.system(size: 10)).foregroundStyle(.secondary)
+                    }
+                }
+
+                Divider().frame(height: 16)
+
+                HStack(spacing: 4) {
+                    Button(action: { doc.onionSkinEnabled.toggle() }) {
+                        Image(systemName: "square.stack")
+                            .foregroundStyle(doc.onionSkinEnabled ? Color.accentColor : Color.secondary)
+                    }
+                    .help("Onion Skin — ghost nearby frames' content on the Stage")
+                    if doc.onionSkinEnabled {
+                        Stepper(value: $doc.onionSkinRange, in: 1...5) {
+                            Text("±\(doc.onionSkinRange)").font(.system(size: 10)).foregroundStyle(.secondary)
+                        }
+                        .help("Frames before/after the playhead to ghost")
+                        .fixedSize()
                     }
                 }
 
@@ -193,8 +210,10 @@ struct TimelineView: View {
                 Button("Cancel") { showingSizePopover = false }
                 Button("OK") {
                     if let w = Double(widthText), let h = Double(heightText), w > 0, h > 0 {
-                        doc.stageWidth = w
-                        doc.stageHeight = h
+                        doc.withUndoSnapshot {
+                            doc.stageWidth = w
+                            doc.stageHeight = h
+                        }
                     }
                     showingSizePopover = false
                 }
@@ -298,9 +317,6 @@ struct LayerRowView: View {
         switch layer.kind {
         case .normal: return "square.on.square"
         case .folder: return "folder.fill"
-        case .mask: return "circle.lefthalf.filled"
-        case .maskedGuide: return "square.dashed"
-        case .guide: return "line.diagonal"
         }
     }
 }
@@ -382,6 +398,8 @@ struct FrameRowView: View {
             }
             tweenArrows
                 .allowsHitTesting(false) // decorative — must not steal taps/double-clicks from the cells underneath
+            frameLabelFlags
+                .allowsHitTesting(false)
             // playhead line through this row
             Rectangle()
                 .fill(Color.red.opacity(0.8))
@@ -403,6 +421,32 @@ struct FrameRowView: View {
             }
         }
         return spans
+    }
+
+    /// Every labeled keyframe on this layer, sorted so the flags always
+    /// draw left to right regardless of `frameLabels`' (unspecified)
+    /// dictionary iteration order.
+    private var labeledFrames: [(frame: Int, text: String)] {
+        layer.frameLabels.sorted { $0.key < $1.key }.map { (frame: $0.key, text: $0.value) }
+    }
+
+    /// A small red flag + the label text, Flash's own frame-label glyph —
+    /// anchored at the labeled frame's left edge and allowed to overflow
+    /// into the cells after it (there's no room for real text in an 8pt
+    /// frame column), same as `tweenArrows`' decorative overlay.
+    private var frameLabelFlags: some View {
+        ForEach(labeledFrames, id: \.frame) { item in
+            HStack(spacing: 2) {
+                Image(systemName: "flag.fill")
+                    .font(.system(size: 6))
+                    .foregroundStyle(.red)
+                Text(item.text)
+                    .font(.system(size: 8))
+                    .foregroundStyle(.primary)
+                    .fixedSize()
+            }
+            .offset(x: CGFloat(item.frame - 1) * frameWidth + 2, y: 1)
+        }
     }
 
     private var tweenArrows: some View {
@@ -494,11 +538,18 @@ private struct FrameCellSlot: View {
                 doc.createTween(layer: layer, from: r.lowerBound, to: r.upperBound)
             }
             .disabled(doc.selectedLayerID != layer.id || doc.selectedFrameRange.count < 2)
+            Button("Remove Tween") { doc.removeTween(layer: layer, at: frame) }
+                .disabled(layer.governingKeyframe(at: frame).flatMap { layer.tweenTarget(from: $0) } == nil)
             Divider()
             Button("Copy Text") { doc.copySelectedPlacement() }
                 .disabled(doc.selectedPlacement == nil)
             Button("Paste Text") { doc.pastePlacedText(layer: layer, at: frame) }
                 .disabled(!doc.hasCopiedText)
+            Divider()
+            Button("Copy Frames") { doc.copySelectedFrames() }
+                .disabled(doc.selectedLayerID != layer.id)
+            Button("Paste Frames") { doc.pasteFrames(layer: layer, at: frame) }
+                .disabled(!doc.hasCopiedFrames)
         }
     }
 

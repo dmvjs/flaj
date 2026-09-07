@@ -11,18 +11,26 @@ declare function stop(): void;
 /** Resumes playback from wherever the playhead currently is. */
 declare function play(): void;
 
-/** Moves to `frame` and stops there. Clamped to 1...totalFrames. */
-declare function gotoAndStop(frame: number): void;
+/**
+ * Moves to `frame` and stops there. Clamped to 1...totalFrames.
+ *
+ * `frame` may also be a frame label (see the Frame Label field in the
+ * Properties panel, set on a keyframe) — resolved by exact match, searching
+ * every layer. An unrecognized label logs a console warning and does
+ * nothing, rather than jumping to frame 0.
+ */
+declare function gotoAndStop(frame: number | string): void;
 
-/** Moves to `frame` and plays from there. Clamped to 1...totalFrames. */
-declare function gotoAndPlay(frame: number): void;
+/** Moves to `frame` and plays from there. Clamped to 1...totalFrames. Accepts a frame label, same as `gotoAndStop`. */
+declare function gotoAndPlay(frame: number | string): void;
 
 /**
  * Repositions the playhead to `frame` without changing whether the movie is
  * playing or stopped. Clamped to 1...contentLength (the last frame with any
- * content), not the document's full addressable range.
+ * content), not the document's full addressable range. Accepts a frame
+ * label, same as `gotoAndStop`.
  */
-declare function goto(frame: number): void;
+declare function goto(frame: number | string): void;
 
 declare const bg: {
     /**

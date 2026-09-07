@@ -4,3 +4,4 @@ Flaj.app/
 *.log
 .DS_Store
 .swiftpm/
+.idea
