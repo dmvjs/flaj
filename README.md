@@ -28,7 +28,7 @@ bg.color('#111');
 stage.tween('title', { x: 200, opacity: 1 }, 20, 'easeOut');
 ```
 
-Globals: `stop`, `play`, `goto`, `gotoAndStop`, `gotoAndPlay`, `bg.color`, `stage.size/addText/setText/setTransform/tween`, `console.log/warn/error`.
+Full reference and execution model: [`docs/SCRIPTING.md`](docs/SCRIPTING.md). Types for editor autocomplete: [`docs/flaj.d.ts`](docs/flaj.d.ts).
 
 ## Shortcuts
 

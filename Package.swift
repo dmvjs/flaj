@@ -5,7 +5,7 @@ let package = Package(
     name: "Flaj",
     platforms: [.macOS(.v14)],
     targets: [
-        .executableTarget(name: "Flaj", path: "Sources/Flaj"),
+        .executableTarget(name: "Flaj", path: "Sources/Flaj", resources: [.copy("Resources")]),
         .testTarget(
             name: "FlajTests",
             dependencies: ["Flaj"],

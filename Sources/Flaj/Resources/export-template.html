@@ -1,0 +1,72 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__FLAJ_TITLE__</title>
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: __FLAJ_PAGE_BACKGROUND__;
+    overflow: hidden;
+  }
+  /* #flaj-frame owns the on-screen footprint (JS keeps its width/height at
+     the Stage's *scaled* pixel size) and everything scale-invariant — the
+     border/shadow — so they stay crisp at any zoom instead of growing fat
+     right along with the content. #flaj-stage inside it stays at the
+     Stage's *native* pixel size and is what actually gets transform: scale()'d,
+     anchored top-left so it exactly fills its frame. */
+  #flaj-frame {
+    position: relative;
+    overflow: hidden;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.15), 0 6px 24px rgba(0, 0, 0, 0.25);
+  }
+  #flaj-stage {
+    position: absolute;
+    top: 0;
+    left: 0;
+    overflow: hidden;
+    transform-origin: top left;
+  }
+  #flaj-text-layer, #flaj-objects-layer {
+    position: absolute;
+    inset: 0;
+  }
+  .flaj-text {
+    position: absolute;
+    box-sizing: border-box;
+    /* No overflow:hidden here on purpose — the native app's own Stage view
+       never clips a text box's content either (SwiftUI's .frame() only
+       sets the box for positioning), so oversized text stays visible
+       there, spilling past its box rather than being silently cropped.
+       #flaj-stage below *does* still clip at the Stage's own edge, which
+       is a deliberate, Flash-accurate choice, not an oversight. */
+    display: flex;
+    align-items: flex-start;
+    white-space: pre-wrap;
+    line-height: 1.2;
+  }
+  .flaj-object {
+    position: absolute;
+    white-space: pre;
+    font-family: -apple-system, system-ui, sans-serif;
+  }
+</style>
+</head>
+<body>
+<div id="flaj-frame">
+  <div id="flaj-stage">
+    <div id="flaj-text-layer"></div>
+    <div id="flaj-objects-layer"></div>
+  </div>
+</div>
+<script id="flaj-document" type="application/json">__FLAJ_DOCUMENT_JSON__</script>
+<script>
+__FLAJ_PLAYER_JS__
+</script>
+</body>
+</html>

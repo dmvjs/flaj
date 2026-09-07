@@ -11,7 +11,56 @@ struct FlajDocumentFile: Codable {
     var stageWidth: Double
     var stageHeight: Double
     var stageColorHex: String
+    var webExportTitle: String
+    var webExportFit: StageFit
+    var webExportAlignment: StageAlignment
+    var webExportPageBackgroundHex: String
+    var webExportPageBackgroundOpacity: Double
+    var webExportMinify: Bool
     var layers: [FlajLayerFile]
+
+    private enum CodingKeys: String, CodingKey {
+        case version, totalFrames, fps, stageWidth, stageHeight, stageColorHex,
+             webExportTitle, webExportFit, webExportAlignment,
+             webExportPageBackgroundHex, webExportPageBackgroundOpacity, webExportMinify, layers
+    }
+
+    init(version: Int = 1, totalFrames: Int, fps: Double, stageWidth: Double, stageHeight: Double,
+         stageColorHex: String, webExportTitle: String = "", webExportFit: StageFit = .contain,
+         webExportAlignment: StageAlignment = .center, webExportPageBackgroundHex: String = "#000000",
+         webExportPageBackgroundOpacity: Double = 0, webExportMinify: Bool = true, layers: [FlajLayerFile]) {
+        self.version = version
+        self.totalFrames = totalFrames
+        self.fps = fps
+        self.stageWidth = stageWidth
+        self.stageHeight = stageHeight
+        self.stageColorHex = stageColorHex
+        self.webExportTitle = webExportTitle
+        self.webExportFit = webExportFit
+        self.webExportAlignment = webExportAlignment
+        self.webExportPageBackgroundHex = webExportPageBackgroundHex
+        self.webExportPageBackgroundOpacity = webExportPageBackgroundOpacity
+        self.webExportMinify = webExportMinify
+        self.layers = layers
+    }
+
+    // Custom decode so .flaj files saved before the web-export options existed still open.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        totalFrames = try c.decode(Int.self, forKey: .totalFrames)
+        fps = try c.decode(Double.self, forKey: .fps)
+        stageWidth = try c.decode(Double.self, forKey: .stageWidth)
+        stageHeight = try c.decode(Double.self, forKey: .stageHeight)
+        stageColorHex = try c.decode(String.self, forKey: .stageColorHex)
+        webExportTitle = try c.decodeIfPresent(String.self, forKey: .webExportTitle) ?? ""
+        webExportFit = try c.decodeIfPresent(StageFit.self, forKey: .webExportFit) ?? .contain
+        webExportAlignment = try c.decodeIfPresent(StageAlignment.self, forKey: .webExportAlignment) ?? .center
+        webExportPageBackgroundHex = try c.decodeIfPresent(String.self, forKey: .webExportPageBackgroundHex) ?? "#000000"
+        webExportPageBackgroundOpacity = try c.decodeIfPresent(Double.self, forKey: .webExportPageBackgroundOpacity) ?? 0
+        webExportMinify = try c.decodeIfPresent(Bool.self, forKey: .webExportMinify) ?? true
+        layers = try c.decode([FlajLayerFile].self, forKey: .layers)
+    }
 }
 
 struct FlajLayerFile: Codable {
@@ -26,14 +75,16 @@ struct FlajLayerFile: Codable {
     var frameScripts: [Int: String]
     var textFrames: [Int: PlacedText]
     var tweenSettings: [Int: TweenSettings]
+    var colorTweenSettings: [Int: TweenSettings]
 
     private enum CodingKeys: String, CodingKey {
-        case name, swatchHex, kind, indent, locked, hidden, expanded, frames, frameScripts, textFrames, tweenSettings
+        case name, swatchHex, kind, indent, locked, hidden, expanded, frames, frameScripts, textFrames,
+             tweenSettings, colorTweenSettings
     }
 
     init(name: String, swatchHex: String, kind: LayerKind, indent: Int, locked: Bool, hidden: Bool,
          expanded: Bool, frames: [FrameMark], frameScripts: [Int: String], textFrames: [Int: PlacedText],
-         tweenSettings: [Int: TweenSettings]) {
+         tweenSettings: [Int: TweenSettings], colorTweenSettings: [Int: TweenSettings]) {
         self.name = name
         self.swatchHex = swatchHex
         self.kind = kind
@@ -45,9 +96,11 @@ struct FlajLayerFile: Codable {
         self.frameScripts = frameScripts
         self.textFrames = textFrames
         self.tweenSettings = tweenSettings
+        self.colorTweenSettings = colorTweenSettings
     }
 
-    // Custom decode so .flaj files saved before textFrames/tweenSettings existed still open.
+    // Custom decode so .flaj files saved before textFrames/tweenSettings/
+    // colorTweenSettings existed still open.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         name = try c.decode(String.self, forKey: .name)
@@ -61,6 +114,7 @@ struct FlajLayerFile: Codable {
         frameScripts = try c.decode([Int: String].self, forKey: .frameScripts)
         textFrames = try c.decodeIfPresent([Int: PlacedText].self, forKey: .textFrames) ?? [:]
         tweenSettings = try c.decodeIfPresent([Int: TweenSettings].self, forKey: .tweenSettings) ?? [:]
+        colorTweenSettings = try c.decodeIfPresent([Int: TweenSettings].self, forKey: .colorTweenSettings) ?? [:]
     }
 }
 
@@ -86,6 +140,22 @@ extension Color {
             Int(round(ns.blueComponent * 255))
         )
     }
+
+    var opacityComponent: Double {
+        Double((NSColor(self).usingColorSpace(.deviceRGB) ?? NSColor(white: 1, alpha: 1)).alphaComponent)
+    }
+
+    /// CSS color literal for this exact color, alpha included — "transparent"
+    /// when fully transparent, `#rrggbb` when fully opaque, `rgba(...)`
+    /// otherwise. Used for `webExportPageBackground`, which (unlike
+    /// `stageColor`) can be partially or fully transparent.
+    var cssString: String {
+        let opacity = opacityComponent
+        if opacity <= 0.001 { return "transparent" }
+        if opacity >= 0.999 { return hexString }
+        let ns = NSColor(self).usingColorSpace(.deviceRGB) ?? NSColor(white: 1, alpha: 1)
+        return "rgba(\(Int(round(ns.redComponent * 255))), \(Int(round(ns.greenComponent * 255))), \(Int(round(ns.blueComponent * 255))), \(opacity))"
+    }
 }
 
 // MARK: - Save / Open
@@ -100,12 +170,19 @@ extension TimelineDocument {
             stageWidth: Double(stageWidth),
             stageHeight: Double(stageHeight),
             stageColorHex: stageColor.hexString,
+            webExportTitle: webExportTitle,
+            webExportFit: webExportFit,
+            webExportAlignment: webExportAlignment,
+            webExportPageBackgroundHex: webExportPageBackground.hexString,
+            webExportPageBackgroundOpacity: webExportPageBackground.opacityComponent,
+            webExportMinify: webExportMinify,
             layers: layers.map { layer in
                 FlajLayerFile(
                     name: layer.name, swatchHex: layer.swatch.hexString, kind: layer.kind,
                     indent: layer.indent, locked: layer.locked, hidden: layer.hidden,
                     expanded: layer.expanded, frames: layer.frames, frameScripts: layer.frameScripts,
-                    textFrames: layer.textFrames, tweenSettings: layer.tweenSettings
+                    textFrames: layer.textFrames, tweenSettings: layer.tweenSettings,
+                    colorTweenSettings: layer.colorTweenSettings
                 )
             }
         )
@@ -119,6 +196,11 @@ extension TimelineDocument {
         stageWidth = CGFloat(file.stageWidth)
         stageHeight = CGFloat(file.stageHeight)
         stageColor = Color(hex: file.stageColorHex)
+        webExportTitle = file.webExportTitle
+        webExportFit = file.webExportFit
+        webExportAlignment = file.webExportAlignment
+        webExportPageBackground = Color(hex: file.webExportPageBackgroundHex).opacity(file.webExportPageBackgroundOpacity)
+        webExportMinify = file.webExportMinify
         layers = file.layers.map { lf in
             let layer = TLLayer(
                 name: lf.name, swatch: Color(hex: lf.swatchHex), kind: lf.kind, indent: lf.indent,
@@ -128,6 +210,7 @@ extension TimelineDocument {
             layer.frameScripts = lf.frameScripts
             layer.textFrames = lf.textFrames
             layer.tweenSettings = lf.tweenSettings
+            layer.colorTweenSettings = lf.colorTweenSettings
             return layer
         }
         selectedLayerID = layers.first?.id

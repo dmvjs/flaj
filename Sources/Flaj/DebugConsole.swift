@@ -3,7 +3,7 @@ import SwiftUI
 /// Flash's Output panel — every console.log/warn/error and trace() call
 /// from frame scripts lands here, tagged with the frame it ran on.
 struct DebugConsoleView: View {
-    @ObservedObject var doc: TimelineDocument
+    let doc: TimelineDocument
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {

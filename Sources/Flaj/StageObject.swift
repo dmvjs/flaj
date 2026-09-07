@@ -1,17 +1,19 @@
 import SwiftUI
+import Observation
 
 /// A text object on the Stage — created/controlled from frame scripts via
 /// the `stage.addText`/`setText`/`setTransform`/`tween` JS globals.
-final class StageObject: Identifiable, ObservableObject {
+@Observable
+final class StageObject: Identifiable {
     let id: String
-    @Published var text: String
-    @Published var fontSize: CGFloat
-    @Published var color: Color
-    @Published var x: CGFloat
-    @Published var y: CGFloat
-    @Published var scale: CGFloat
-    @Published var rotation: Double // degrees
-    @Published var opacity: Double
+    var text: String
+    var fontSize: CGFloat
+    var color: Color
+    var x: CGFloat
+    var y: CGFloat
+    var scale: CGFloat
+    var rotation: Double // degrees
+    var opacity: Double
 
     init(id: String, text: String, x: CGFloat, y: CGFloat, fontSize: CGFloat = 24,
          color: Color = .black, scale: CGFloat = 1, rotation: Double = 0, opacity: Double = 1) {
@@ -44,6 +46,48 @@ struct PlacedText: Codable, Equatable {
     var italic: Bool = false
     var colorHex: String = "#000000"
     var alignment: TextHAlign = .leading
+    var opacity: Double = 1
+
+    init(text: String = "Text", x: CGFloat, y: CGFloat, width: CGFloat = 160, height: CGFloat = 40,
+         fontName: String = "Helvetica", fontSize: CGFloat = 24, bold: Bool = false, italic: Bool = false,
+         colorHex: String = "#000000", alignment: TextHAlign = .leading, opacity: Double = 1) {
+        self.text = text
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.fontName = fontName
+        self.fontSize = fontSize
+        self.bold = bold
+        self.italic = italic
+        self.colorHex = colorHex
+        self.alignment = alignment
+        self.opacity = opacity
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case text, x, y, width, height, fontName, fontSize, bold, italic, colorHex, alignment, opacity
+    }
+
+    // Custom decode so .flaj files saved before `opacity` existed still open —
+    // decodeIfPresent with each field's own declared default throughout,
+    // not just for `opacity`, so this stays correct regardless of which
+    // fields existed when a given file was written.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        text = try c.decodeIfPresent(String.self, forKey: .text) ?? "Text"
+        x = try c.decode(CGFloat.self, forKey: .x)
+        y = try c.decode(CGFloat.self, forKey: .y)
+        width = try c.decodeIfPresent(CGFloat.self, forKey: .width) ?? 160
+        height = try c.decodeIfPresent(CGFloat.self, forKey: .height) ?? 40
+        fontName = try c.decodeIfPresent(String.self, forKey: .fontName) ?? "Helvetica"
+        fontSize = try c.decodeIfPresent(CGFloat.self, forKey: .fontSize) ?? 24
+        bold = try c.decodeIfPresent(Bool.self, forKey: .bold) ?? false
+        italic = try c.decodeIfPresent(Bool.self, forKey: .italic) ?? false
+        colorHex = try c.decodeIfPresent(String.self, forKey: .colorHex) ?? "#000000"
+        alignment = try c.decodeIfPresent(TextHAlign.self, forKey: .alignment) ?? .leading
+        opacity = try c.decodeIfPresent(Double.self, forKey: .opacity) ?? 1
+    }
 }
 
 enum TextHAlign: String, Codable, CaseIterable {

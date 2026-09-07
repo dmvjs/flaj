@@ -57,6 +57,30 @@ enum DocumentFixtures {
         return doc
     }
 
+    /// A 3-frame span (so the midpoint frame lands at an exact rawT of 0.5)
+    /// that fades color black->white and opacity 1->0, on `.linear` easing
+    /// so the expected midpoint is exact, not just approximately eased —
+    /// isolates TLLayer.colorTweenSettings from the position/size tween,
+    /// which stays untouched (same x/y/width/height start to end).
+    static func colorFadeText() -> TimelineDocument {
+        let frames: [FrameMark] = [.keyframe(hasScript: false), .tween, .keyframe(hasScript: false)]
+        let layer = TLLayer(name: "text", swatch: .green, frames: frames)
+        layer.textFrames[1] = PlacedText(
+            text: "Flaj", x: 10, y: 10, width: 100, height: 30, colorHex: "#000000", opacity: 1
+        )
+        layer.textFrames[3] = PlacedText(
+            text: "Flaj", x: 10, y: 10, width: 100, height: 30, colorHex: "#FFFFFF", opacity: 0
+        )
+        layer.tweenSettings[1] = TweenSettings(family: .linear)
+        layer.colorTweenSettings[1] = TweenSettings(family: .linear)
+
+        let doc = TimelineDocument(layers: [layer], totalFrames: 3)
+        doc.stageWidth = 120
+        doc.stageHeight = 50
+        doc.fps = 8
+        return doc
+    }
+
     /// Touches every field `FlajDocumentFile`/`FlajLayerFile` persist —
     /// two layers (one a locked/hidden folder), frame scripts, placed text,
     /// and tween settings — so a save/open round-trip test exercises the
@@ -76,16 +100,22 @@ enum DocumentFixtures {
         )
         art.expanded = false
         art.textFrames = [
-            1: PlacedText(text: "A", x: 1, y: 2, width: 30, height: 12, colorHex: "#112233"),
-            3: PlacedText(text: "B", x: 10, y: 20, width: 30, height: 12, colorHex: "#445566")
+            1: PlacedText(text: "A", x: 1, y: 2, width: 30, height: 12, colorHex: "#112233", opacity: 1),
+            3: PlacedText(text: "B", x: 10, y: 20, width: 30, height: 12, colorHex: "#445566", opacity: 0.4)
         ]
         art.tweenSettings = [1: TweenSettings(family: .elastic, direction: .easeInOut, amount: 65, rotate: .cw, rotateTimes: 2)]
+        art.colorTweenSettings = [1: TweenSettings(family: .sine, direction: .easeIn, amount: 80)]
 
         let doc = TimelineDocument(layers: [actions, art], totalFrames: 3)
         doc.stageWidth = 320
         doc.stageHeight = 180
         doc.stageColor = .init(red: 0.1, green: 0.2, blue: 0.3)
         doc.fps = 24
+        doc.webExportTitle = "My Movie"
+        doc.webExportFit = .cover
+        doc.webExportAlignment = .bottomTrailing
+        doc.webExportPageBackground = Color(red: 0.4, green: 0.1, blue: 0.6, opacity: 0.5)
+        doc.webExportMinify = false
         return doc
     }
 

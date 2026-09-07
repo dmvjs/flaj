@@ -188,7 +188,7 @@ enum JSHighlighter {
 /// selected in the timeline. Only keyframes can carry a script, matching
 /// Flash's rule that actions attach to keyframes.
 struct CodeEditorPanel: View {
-    @ObservedObject var doc: TimelineDocument
+    let doc: TimelineDocument
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {

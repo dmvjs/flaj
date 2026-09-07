@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// The Stage's actual content — background + text objects — at a given
 /// `scale` factor. Shared between the live preview (StageView, scaled to
@@ -6,7 +7,7 @@ import SwiftUI
 /// size via ImageRenderer), so what you see while editing is exactly what
 /// gets exported.
 struct StageContentView: View {
-    @ObservedObject var doc: TimelineDocument
+    let doc: TimelineDocument
     var scale: CGFloat
 
     var body: some View {
@@ -40,8 +41,8 @@ struct StageContentView: View {
 /// A layer's authored, design-time text — placed and edited with the Text
 /// tool, distinct from the script-driven StageObject/StageTextView above.
 private struct StagePlacedTextView: View {
-    @ObservedObject var doc: TimelineDocument
-    @ObservedObject var layer: TLLayer
+    let doc: TimelineDocument
+    let layer: TLLayer
     let keyframe: Int
     var scale: CGFloat
 
@@ -87,6 +88,7 @@ private struct StagePlacedTextView: View {
             .multilineTextAlignment(shown.alignment.swiftUIAlignment)
             .frame(width: shown.width * scale, height: shown.height * scale,
                    alignment: shown.alignment.frameAlignment)
+            .opacity(shown.opacity)
             .contentShape(Rectangle())
             .overlay(isSelected ? Rectangle().stroke(Color.accentColor, lineWidth: 1.5) : nil)
             .overlay(alignment: .bottomTrailing) { if isSelected { resizeHandle } }
@@ -94,6 +96,11 @@ private struct StagePlacedTextView: View {
             .position(x: (shown.x + shown.width / 2) * scale, y: (shown.y + shown.height / 2) * scale)
             .onTapGesture { doc.selectedPlacement = ref }
             .gesture(moveGesture)
+            // A stable hook for UI automation/accessibility tooling to find
+            // this exact element — the SwiftUI/AppKit equivalent of a
+            // data-testid, invisible to VoiceOver users (unlike
+            // accessibilityLabel), queryable via the accessibility tree.
+            .accessibilityIdentifier("stage-placed-text")
     }
 
     private var moveGesture: some Gesture {
@@ -131,7 +138,7 @@ private struct StagePlacedTextView: View {
 }
 
 private struct StageTextView: View {
-    @ObservedObject var obj: StageObject
+    let obj: StageObject
     var scale: CGFloat
 
     var body: some View {
@@ -152,8 +159,17 @@ private struct StageTextView: View {
 /// a literal `.frame(width:height:)` at the Stage's raw pixel size would
 /// overflow edge-to-edge whenever the panel is smaller than the Stage.
 struct StageView: View {
-    @ObservedObject var doc: TimelineDocument
+    let doc: TimelineDocument
     private let padding: CGFloat = 28
+
+    // A local NSEvent monitor rather than SwiftUI's .onKeyPress: the Stage
+    // sits inside HSplitView, whose divider intercepts left/right arrow
+    // keys for its own keyboard-driven resize before .onKeyPress ever saw
+    // them (confirmed live — up/down nudge worked, left/right silently
+    // did nothing). A local monitor intercepts at the application level,
+    // ahead of any view's responder chain, so it isn't at the mercy of
+    // whichever control happens to hold focus.
+    @State private var keyMonitor: Any?
 
     var body: some View {
         GeometryReader { geo in
@@ -176,5 +192,33 @@ struct StageView: View {
             }
             .frame(width: geo.size.width, height: geo.size.height)
         }
+        .onAppear {
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                nudgeSelection(event) ? nil : event // nil consumes the event; returning it lets it propagate as normal
+            }
+        }
+        .onDisappear {
+            if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+            keyMonitor = nil
+        }
+    }
+
+    /// Arrow keys move the selected placed-text box 1pt per press, 10pt
+    /// with Shift held — Flash's classic nudge amounts. Returns whether the
+    /// event was consumed; when nothing's selected (or it's not an arrow
+    /// key) it isn't, so the key event propagates normally. The actual
+    /// move is TimelineDocument.nudgeSelectedPlacement, which has its own
+    /// direct unit test.
+    private func nudgeSelection(_ event: NSEvent) -> Bool {
+        guard doc.selectedPlacement != nil else { return false }
+        let step: CGFloat = event.modifierFlags.contains(.shift) ? 10 : 1
+        switch Int(event.keyCode) {
+        case 126: doc.nudgeSelectedPlacement(dx: 0, dy: -step) // up
+        case 125: doc.nudgeSelectedPlacement(dx: 0, dy: step)  // down
+        case 123: doc.nudgeSelectedPlacement(dx: -step, dy: 0) // left
+        case 124: doc.nudgeSelectedPlacement(dx: step, dy: 0)  // right
+        default: return false
+        }
+        return true
     }
 }

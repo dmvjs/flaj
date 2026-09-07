@@ -7,7 +7,7 @@ let layerPanelWidth: CGFloat = 190
 let layerIconColWidth: CGFloat = 18
 
 struct TimelineView: View {
-    @ObservedObject var doc: TimelineDocument
+    @Bindable var doc: TimelineDocument
     @State private var showingSizePopover = false
     @State private var widthText = ""
     @State private var heightText = ""
@@ -215,8 +215,8 @@ struct TimelineView: View {
 // MARK: - Layer panel row
 
 struct LayerRowView: View {
-    @ObservedObject var doc: TimelineDocument
-    @ObservedObject var layer: TLLayer
+    let doc: TimelineDocument
+    let layer: TLLayer
     @State private var isDropTarget = false
 
     var isSelected: Bool { doc.selectedLayerID == layer.id }
@@ -259,7 +259,7 @@ struct LayerRowView: View {
                 Rectangle()
                     .fill(layer.swatch)
                     .frame(width: 12, height: 12)
-                    .overlay(Rectangle().stroke(Color.black.opacity(0.4), lineWidth: 0.5))
+                    .overlay(Rectangle().stroke(Color.primary.opacity(0.4), lineWidth: 0.5))
                     .frame(width: layerIconColWidth)
             }
         }
@@ -308,7 +308,7 @@ struct LayerRowView: View {
 // MARK: - Ruler
 
 struct RulerView: View {
-    @ObservedObject var doc: TimelineDocument
+    let doc: TimelineDocument
     let frameCount: Int
 
     var body: some View {
@@ -363,8 +363,8 @@ struct RulerView: View {
 // MARK: - Per-layer frame row
 
 struct FrameRowView: View {
-    @ObservedObject var doc: TimelineDocument
-    @ObservedObject var layer: TLLayer
+    let doc: TimelineDocument
+    let layer: TLLayer
     let frameCount: Int
 
     var body: some View {
@@ -443,8 +443,8 @@ struct FrameRowView: View {
 /// FrameRowView's ForEach) so it can own `dragTranslationFrames` as local
 /// state for sliding a tween's end keyframe.
 private struct FrameCellSlot: View {
-    @ObservedObject var doc: TimelineDocument
-    @ObservedObject var layer: TLLayer
+    let doc: TimelineDocument
+    let layer: TLLayer
     let frame: Int
     let columnIndex: Int
     /// Non-nil, and equal to this tween's start frame, when this cell is a
@@ -555,14 +555,14 @@ struct FrameCellView: View {
 
             switch mark {
             case .keyframe(let hasScript):
-                Circle().fill(Color.black).frame(width: 5, height: 5)
+                Circle().fill(Color.primary).frame(width: 5, height: 5)
                 if hasScript {
                     Circle().stroke(Color.orange, lineWidth: 1).frame(width: 7, height: 7).offset(y: -6)
                 }
             case .emptyKeyframe:
-                Circle().stroke(Color.black, lineWidth: 1).frame(width: 5, height: 5)
+                Circle().stroke(Color.primary, lineWidth: 1).frame(width: 5, height: 5)
             case .spanEnd:
-                Circle().stroke(Color.black.opacity(0.6), lineWidth: 1).frame(width: 4, height: 4)
+                Circle().stroke(Color.primary.opacity(0.6), lineWidth: 1).frame(width: 4, height: 4)
             case .tween, .plain, .empty:
                 EmptyView()
             }

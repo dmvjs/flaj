@@ -4,7 +4,7 @@ import SwiftUI
 /// supports — Selection (move/resize placed text) and Text (click the
 /// Stage to place a new text box).
 struct ToolbarView: View {
-    @ObservedObject var doc: TimelineDocument
+    let doc: TimelineDocument
 
     var body: some View {
         VStack(spacing: 4) {

@@ -1,0 +1,553 @@
+// Flaj web player — reimplements the playback/tween/frame-script runtime
+// from TimelineModel.swift and the rendering rules from StageView.swift, so
+// an exported page behaves like the movie actually running, not a recording
+// of one run through it. Ported by hand rather than shared source with the
+// Swift app, so a behavioral change on one side needs the same change made
+// here (see docs/SCRIPTING.md).
+//
+// Declarative placed-text tweens run as real Web Animations
+// (element.animate), not per-tick JS-recomputed positions — once a span's
+// Animation is created it plays on the browser's own compositor-driven
+// clock, untouched by this file, until the playhead crosses into a
+// different span. That's the source of both the smoothness (real interp at
+// display refresh rate, not the movie's fps) and the efficiency (no JS work
+// at all for a tween in progress). A `requestAnimationFrame` loop still
+// runs, but only to detect *integer* frame-boundary crossings — for running
+// frame scripts and swapping in the next span — never to drive motion.
+(function () {
+  'use strict';
+
+  const doc = JSON.parse(document.getElementById('flaj-document').textContent);
+  const frameEl = document.getElementById('flaj-frame');
+  const stageEl = document.getElementById('flaj-stage');
+  const textLayerEl = document.getElementById('flaj-text-layer');
+  const objectsLayerEl = document.getElementById('flaj-objects-layer');
+
+  let stageWidth = doc.stageWidth;
+  let stageHeight = doc.stageHeight;
+  let stageColor = doc.stageColorHex;
+  let fps = doc.fps;
+  const totalFrames = doc.totalFrames;
+
+  let playhead = 1;
+  let isPlaying = false;
+  let rafHandle = null;
+  let frameOriginTime = null; // performance.now() timestamp `playhead` was last exactly entered
+  const stageObjects = new Map(); // id -> {text,x,y,fontSize,color,scale,rotation,opacity}
+  let activeTweens = [];
+  const declaredTopLevelBindings = new Set();
+
+  // ---- frame-mark helpers (mirrors TLLayer in TimelineModel.swift) ----
+
+  function isKeyframe(frames, frame) {
+    const mark = frames[frame - 1];
+    return !!mark && (mark.type === 'keyframe' || mark.type === 'emptyKeyframe');
+  }
+
+  function governingKeyframe(frames, frame) {
+    let i = frame - 1;
+    while (i >= 0 && i < frames.length) {
+      const type = frames[i].type;
+      if (type === 'keyframe' || type === 'emptyKeyframe') return i + 1;
+      if (type === 'plain' || type === 'tween') { i -= 1; continue; }
+      return null;
+    }
+    return null;
+  }
+
+  function tweenTarget(frames, startKeyframe) {
+    let i = startKeyframe; // 0-based index of the frame right after startKeyframe
+    if (i < 0 || i >= frames.length || frames[i].type !== 'tween') return null;
+    while (i < frames.length) {
+      const type = frames[i].type;
+      if (type === 'tween') { i += 1; continue; }
+      if (type === 'keyframe' || type === 'emptyKeyframe') return i + 1;
+      return null;
+    }
+    return null;
+  }
+
+  function contentLength() {
+    let last = 1;
+    for (const layer of doc.layers) {
+      layer.frames.forEach((mark, i) => { if (mark.type !== 'empty') last = Math.max(last, i + 1); });
+    }
+    return last;
+  }
+
+  // ---- easing (mirrors TweenSettings/EaseFamily in StageObject.swift) ----
+
+  function bounceOut(t) {
+    const n1 = 7.5625, d1 = 2.75;
+    if (t < 1 / d1) return n1 * t * t;
+    if (t < 2 / d1) { t -= 1.5 / d1; return n1 * t * t + 0.75; }
+    if (t < 2.5 / d1) { t -= 2.25 / d1; return n1 * t * t + 0.9375; }
+    t -= 2.625 / d1;
+    return n1 * t * t + 0.984375;
+  }
+
+  function easeInFamily(family, t) {
+    switch (family) {
+      case 'sine': return 1 - Math.cos(t * Math.PI / 2);
+      case 'quad': return t * t;
+      case 'cubic': return t * t * t;
+      case 'back': { const c1 = 1.70158, c3 = c1 + 1; return c3 * t * t * t - c1 * t * t; }
+      case 'elastic': {
+        if (t <= 0 || t >= 1) return t;
+        const c4 = (2 * Math.PI) / 3;
+        return -Math.pow(2, 10 * t - 10) * Math.sin((t * 10 - 10.75) * c4);
+      }
+      case 'bounce': return 1 - bounceOut(1 - t);
+      default: return t; // linear
+    }
+  }
+
+  function easedProgress(settings, t) {
+    const clamped = Math.min(Math.max(t, 0), 1);
+    if (!settings || settings.family === 'linear') return clamped;
+    let curved;
+    if (settings.direction === 'easeIn') {
+      curved = easeInFamily(settings.family, clamped);
+    } else if (settings.direction === 'easeOut') {
+      curved = 1 - easeInFamily(settings.family, 1 - clamped);
+    } else {
+      curved = clamped < 0.5
+        ? easeInFamily(settings.family, clamped * 2) / 2
+        : 1 - easeInFamily(settings.family, (1 - clamped) * 2) / 2;
+    }
+    const blend = Math.min(Math.max(settings.amount ?? 100, 0), 100) / 100;
+    return clamped + (curved - clamped) * blend;
+  }
+
+  function spinDegrees(settings, t) {
+    if (!settings || !settings.rotate || settings.rotate === 'none') return 0;
+    const direction = settings.rotate === 'cw' ? 1 : -1;
+    return direction * 360 * (settings.rotateTimes || 0) * easedProgress(settings, t);
+  }
+
+  const SIMPLE_EASING = {
+    linear: t => t,
+    easeIn: t => t * t,
+    easeOut: t => 1 - (1 - t) * (1 - t),
+    easeInOut: t => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2)
+  };
+
+  // CSS's linear() easing function takes evenly-spaced output samples and
+  // interpolates between them — the one native timing function expressive
+  // enough to reproduce a non-monotonic curve like bounce/elastic exactly
+  // (cubic-bezier() can't). Sampling a plain 0...1 function this way is how
+  // *any* of these curves becomes a real, GPU/compositor-friendly CSS
+  // easing instead of JS recomputing a position every tick.
+  function cssLinearEasing(sample) {
+    const steps = 40;
+    const values = [];
+    for (let i = 0; i <= steps; i++) values.push(sample(i / steps).toFixed(4));
+    return `linear(${values.join(', ')})`;
+  }
+
+  function cssEasingForTween(settings) {
+    if (!settings || settings.family === 'linear') return 'linear';
+    return cssLinearEasing(t => easedProgress(settings, t));
+  }
+
+  function cssEasingForSimple(name) {
+    const fn = SIMPLE_EASING[name] || SIMPLE_EASING.linear;
+    return name === 'linear' ? 'linear' : cssLinearEasing(fn);
+  }
+
+  // ---- placed text: real Web Animations per tween span ----
+  // (mirrors TLLayer.interpolatedPlacedText, but the interpolation itself
+  // happens natively — this only computes the two keyframes' endpoints.)
+
+  const layerVisuals = new Map(); // layerIndex -> { kf, element, animations: Animation[] }
+
+  function textAlignStyle(alignment) {
+    switch (alignment) {
+      case 'center': return { textAlign: 'center', justifyContent: 'center' };
+      case 'trailing': return { textAlign: 'right', justifyContent: 'flex-end' };
+      default: return { textAlign: 'left', justifyContent: 'flex-start' };
+    }
+  }
+
+  // Properties that don't interpolate over a span at all, tweened or not —
+  // fixed at the start keyframe's value for the span's whole duration,
+  // exactly like TLLayer.interpolatedPlacedText only carries forward
+  // x/y/width/height/fontSize (from `tweenSettings`) and colorHex/opacity
+  // (from `colorTweenSettings`), spreading everything else from `base`.
+  function applyStaticTextStyle(el, base) {
+    el.textContent = base.text;
+    el.style.fontFamily = base.fontName + ', sans-serif';
+    el.style.fontWeight = base.bold ? 'bold' : 'normal';
+    el.style.fontStyle = base.italic ? 'italic' : 'normal';
+    const align = textAlignStyle(base.alignment);
+    el.style.textAlign = align.textAlign;
+    el.style.justifyContent = align.justifyContent;
+  }
+
+  function boxKeyframe(placement, spinDeg) {
+    return {
+      left: placement.x + 'px', top: placement.y + 'px',
+      width: placement.width + 'px', height: placement.height + 'px',
+      fontSize: placement.fontSize + 'px',
+      transform: `rotate(${spinDeg}deg)`
+    };
+  }
+
+  function colorKeyframe(placement) {
+    return { color: placement.colorHex, opacity: String(placement.opacity) };
+  }
+
+  /// Builds the DOM element + (for a tween span) its two independent Web
+  /// Animations for the span governed by keyframe `kf` on `layer` — called
+  /// once per span, not per frame. Position/size/rotation ease on
+  /// `tweenSettings`; color/opacity ease separately on
+  /// `colorTweenSettings` — same start/end frames, their own curve, two
+  /// concurrent `animate()` calls on the same element (exactly what the Web
+  /// Animations API is for), not one animation forced to share a curve
+  /// across unrelated properties.
+  function createLayerVisual(layer, kf) {
+    const base = layer.textFrames[kf];
+    const el = document.createElement('div');
+    el.className = 'flaj-text';
+    applyStaticTextStyle(el, base);
+    textLayerEl.appendChild(el);
+
+    const endKf = tweenTarget(layer.frames, kf);
+    const end = endKf != null ? layer.textFrames[endKf] : null;
+    const animations = [];
+    if (endKf != null && end && endKf > kf) {
+      const durationMs = ((endKf - kf) / fps) * 1000;
+
+      const boxSettings = layer.tweenSettings[kf];
+      const totalSpin = spinDegrees(boxSettings, 1);
+      const boxAnimation = el.animate(
+        [boxKeyframe(base, 0), boxKeyframe(end, totalSpin)],
+        { duration: durationMs, easing: cssEasingForTween(boxSettings), fill: 'both' }
+      );
+      boxAnimation.pause();
+      animations.push(boxAnimation);
+
+      const colorSettings = layer.colorTweenSettings[kf];
+      const colorAnimation = el.animate(
+        [colorKeyframe(base), colorKeyframe(end)],
+        { duration: durationMs, easing: cssEasingForTween(colorSettings), fill: 'both' }
+      );
+      colorAnimation.pause();
+      animations.push(colorAnimation);
+    } else {
+      Object.assign(el.style, boxKeyframe(base, 0), colorKeyframe(base));
+    }
+    return { kf, element: el, animations };
+  }
+
+  /// Makes sure `layerIndex` is showing the right span for `frame` (an
+  /// integer for a routine tick, but can be fractional for an explicit
+  /// scrub mid-span). Reuses the existing Animations untouched when the
+  /// span hasn't changed and `forceTimeSync` isn't set — that's what leaves
+  /// in-progress motion alone to keep running on its own native clock.
+  function syncLayerVisual(layerIndex, layer, frame, forceTimeSync) {
+    const kf = governingKeyframe(layer.frames, Math.floor(frame));
+    const existing = layerVisuals.get(layerIndex);
+
+    if (kf == null || layer.hidden || !layer.textFrames[kf]) {
+      if (existing) { existing.animations.forEach(a => a.cancel()); existing.element.remove(); layerVisuals.delete(layerIndex); }
+      return;
+    }
+
+    let visual = existing;
+    if (!visual || visual.kf !== kf) {
+      if (visual) { visual.animations.forEach(a => a.cancel()); visual.element.remove(); }
+      visual = createLayerVisual(layer, kf);
+      layerVisuals.set(layerIndex, visual);
+      forceTimeSync = true; // a freshly created span always needs its clock set once
+    }
+
+    for (const animation of visual.animations) {
+      if (forceTimeSync) animation.currentTime = ((frame - kf) / fps) * 1000;
+      if (isPlaying) {
+        if (animation.playState !== 'running') animation.play();
+      } else if (animation.playState === 'running') {
+        animation.pause();
+      }
+    }
+  }
+
+  function syncAllLayerVisuals(frame, forceTimeSync) {
+    doc.layers.forEach((layer, i) => syncLayerVisual(i, layer, frame, forceTimeSync));
+  }
+
+  // ---- stage (script-created) objects ----
+  // Dynamic and only known once a script actually calls stage.tween(), so
+  // (unlike the declarative placed-text spans above) these stay
+  // JS-recomputed each tick — but from a fractional, continuously-advancing
+  // frame number, so motion is still smooth between logical frame
+  // boundaries, just not fully compositor-offloaded.
+
+  function makeStageObjectNode(obj) {
+    const div = document.createElement('div');
+    div.className = 'flaj-object';
+    div.textContent = obj.text;
+    div.style.left = obj.x + 'px';
+    div.style.top = obj.y + 'px';
+    div.style.fontSize = obj.fontSize + 'px';
+    div.style.color = obj.color;
+    div.style.opacity = String(obj.opacity);
+    div.style.transform = `translate(-50%, -50%) scale(${obj.scale}) rotate(${obj.rotation}deg)`;
+    return div;
+  }
+
+  function renderStageObjects() {
+    objectsLayerEl.replaceChildren();
+    for (const obj of stageObjects.values()) {
+      objectsLayerEl.appendChild(makeStageObjectNode(obj));
+    }
+  }
+
+  // ---- frame scripts & the JS globals they run against ----
+  // (mirrors TimelineDocument.makeJSContext in TimelineModel.swift)
+
+  function preprocessForReentry(script) {
+    const declRe = /^([ \t]*)(const|let)\s+([A-Za-z_$][A-Za-z0-9_$]*)\b/;
+    return script.split('\n').map(line => {
+      const m = declRe.exec(line);
+      if (!m) return line;
+      const name = m[3];
+      if (declaredTopLevelBindings.has(name)) return '// (already declared) ' + line;
+      declaredTopLevelBindings.add(name);
+      return line;
+    }).join('\n');
+  }
+
+  function runScriptsOnCurrentFrame() {
+    for (const layer of doc.layers) {
+      if (!isKeyframe(layer.frames, playhead)) continue;
+      const script = layer.frameScripts[playhead];
+      if (!script) continue;
+      try {
+        // Indirect eval — runs in global scope, same realm every call, so a
+        // `const`/`let` from an earlier frame is still visible (and must be
+        // skipped, not re-thrown) the way JSContext's shared context behaves.
+        (0, eval)(preprocessForReentry(script));
+      } catch (e) {
+        console.error(e && e.message ? e.message : String(e));
+      }
+    }
+  }
+
+  function clamp(frame, lo, hi) { return Math.min(Math.max(frame, lo), hi); }
+
+  // ---- the clock ----
+  // requestAnimationFrame instead of setInterval: pauses automatically when
+  // the tab/page isn't visible, and stays synced to the display's actual
+  // refresh cycle. It only ever checks "has enough wall-clock time passed
+  // to cross an integer frame boundary" — the visual motion in between is
+  // never its job.
+
+  function frameDurationMs() { return 1000 / fps; }
+
+  function currentFractionalFrame(now) {
+    if (frameOriginTime == null) return playhead;
+    return playhead + Math.min(0.999, (now - frameOriginTime) / frameDurationMs());
+  }
+
+  function loop(now) {
+    if (!isPlaying) { rafHandle = null; return; }
+    if (frameOriginTime == null) frameOriginTime = now;
+
+    // Bounded, not `while (isPlaying)`: a pathological fps/duration
+    // shouldn't be able to wedge this in an unbounded synchronous loop.
+    for (let guard = 0; guard < 1000 && now - frameOriginTime >= frameDurationMs(); guard++) {
+      playhead = playhead >= contentLength() ? 1 : playhead + 1;
+      frameOriginTime += frameDurationMs();
+      runScriptsOnCurrentFrame();
+      syncAllLayerVisuals(playhead, false);
+      if (!isPlaying) { rafHandle = null; return; } // the script may have called stop()
+    }
+
+    advanceTweens(currentFractionalFrame(now));
+    renderStageObjects();
+
+    // A single-content-frame movie has nowhere left to advance to — with no
+    // stage-object tween still in flight either, "looping" would just mean
+    // re-running the same script forever. Settle instead, like a static
+    // hand-authored page that ran its one <script> and is done.
+    if (contentLength() <= 1 && activeTweens.length === 0) { isPlaying = false; rafHandle = null; return; }
+
+    rafHandle = requestAnimationFrame(loop);
+  }
+
+  function stop() {
+    isPlaying = false;
+    for (const visual of layerVisuals.values()) visual.animations.forEach(a => a.pause());
+  }
+
+  function play() {
+    isPlaying = true;
+    frameOriginTime = null;
+    runScriptsOnCurrentFrame();
+    syncAllLayerVisuals(playhead, true);
+    renderStageObjects();
+    if (!isPlaying) return; // the frame's own script may have called stop()
+    if (contentLength() <= 1 && activeTweens.length === 0) { isPlaying = false; return; }
+    if (rafHandle == null) rafHandle = requestAnimationFrame(loop);
+  }
+
+  function gotoAndStop(frame) {
+    stop();
+    playhead = clamp(frame, 1, totalFrames);
+    frameOriginTime = null;
+    runScriptsOnCurrentFrame();
+    syncAllLayerVisuals(playhead, true);
+    renderStageObjects();
+  }
+
+  function gotoAndPlay(frame) {
+    playhead = clamp(frame, 1, totalFrames);
+    frameOriginTime = null;
+    play();
+  }
+
+  function goto(frame) {
+    playhead = clamp(frame, 1, contentLength());
+    frameOriginTime = null;
+    runScriptsOnCurrentFrame();
+    syncAllLayerVisuals(playhead, true);
+    renderStageObjects();
+  }
+
+  // CSS already understands hex ("#ff0000"), named colors
+  // ("cornflowerblue"), and "transparent" natively — no lookup table needed
+  // here the way the Swift side needs one for SwiftUI's Color.
+  const bg = {
+    color(value) { stageColor = value; stageEl.style.backgroundColor = stageColor; }
+  };
+
+  const stageObjectDefaults = { fontSize: 24, color: '#000000', scale: 1, rotation: 0, opacity: 1 };
+
+  function startTween(id, property, to, frames, easingName) {
+    const obj = stageObjects.get(id);
+    if (!obj) return;
+    const from = obj[property];
+    activeTweens = activeTweens.filter(tw => !(tw.id === id && tw.property === property));
+    activeTweens.push({ id, property, from, to, startFrame: playhead, duration: Math.max(1, frames), easing: SIMPLE_EASING[easingName] || SIMPLE_EASING.linear });
+  }
+
+  function advanceTweens(frame) {
+    if (!activeTweens.length) return;
+    const remaining = [];
+    for (const tw of activeTweens) {
+      const obj = stageObjects.get(tw.id);
+      if (!obj) continue;
+      const rawT = (frame - tw.startFrame) / tw.duration;
+      const t = tw.easing(Math.min(Math.max(rawT, 0), 1));
+      obj[tw.property] = tw.from + (tw.to - tw.from) * t;
+      if (rawT < 1) remaining.push(tw);
+    }
+    activeTweens = remaining;
+  }
+
+  const stage = {
+    size(w, h) {
+      stageWidth = Math.max(1, w);
+      stageHeight = Math.max(1, h);
+      stageEl.style.width = stageWidth + 'px';
+      stageEl.style.height = stageHeight + 'px';
+      fitStageToViewport();
+    },
+    addText(id, text, x, y) {
+      if (stageObjects.has(id)) return; // ids are stable handles, not re-creatable
+      stageObjects.set(id, { ...stageObjectDefaults, text, x, y });
+      renderStageObjects();
+      if (!isPlaying && rafHandle == null) rafHandle = requestAnimationFrame(loop); // a static page can still host a live object
+    },
+    setText(id, text) {
+      const obj = stageObjects.get(id);
+      if (!obj) return;
+      obj.text = text;
+      renderStageObjects();
+    },
+    setTransform(id, props) {
+      const obj = stageObjects.get(id);
+      if (!obj || !props) return;
+      for (const key of ['x', 'y', 'scale', 'rotation', 'opacity']) {
+        if (props[key] !== undefined) obj[key] = props[key];
+      }
+      renderStageObjects();
+    },
+    tween(id, props, frames, easing) {
+      if (!props) return;
+      for (const key of ['x', 'y', 'scale', 'rotation', 'opacity', 'fontSize']) {
+        if (props[key] !== undefined) startTween(id, key, props[key], frames, easing);
+      }
+      if (!isPlaying && rafHandle == null) rafHandle = requestAnimationFrame(loop);
+    }
+  };
+
+  const trace = console.log.bind(console);
+
+  // Expose the runtime API as real globals — frame scripts run via indirect
+  // eval in this same global scope, exactly like a bare <script> tag would
+  // see them.
+  Object.assign(window, { stop, play, gotoAndStop, gotoAndPlay, goto, bg, stage, trace });
+
+  // ---- layout: fit + alignment ----
+  //
+  // #flaj-stage is transform: scale()'d, but a transform never changes an
+  // element's own layout size — so #flaj-frame (unscaled, owns the
+  // border/shadow) has its *actual* width/height set to match here. That's
+  // what keeps the border hairline-crisp at any zoom instead of scaling up
+  // fat with the content, and what makes body's flex alignment (the 9-point
+  // StageAlignment grid) anchor against the Stage's real on-screen edges —
+  // a corner alignment combined with `.cover`/`.none` genuinely hugs that
+  // corner now, rather than scaling outward from a fixed center point
+  // regardless of which corner was actually requested.
+
+  function fitStageToViewport() {
+    const viewportWidth = document.documentElement.clientWidth;
+    const viewportHeight = document.documentElement.clientHeight;
+    const scaleX = viewportWidth / stageWidth;
+    const scaleY = viewportHeight / stageHeight;
+    let scale;
+    switch (doc.webExportFit) {
+      case 'cover': scale = Math.max(scaleX, scaleY); break;
+      case 'none': scale = 1; break;
+      default: scale = Math.min(scaleX, scaleY); break; // contain
+    }
+    stageEl.style.transform = `scale(${scale})`;
+    frameEl.style.width = (stageWidth * scale) + 'px';
+    frameEl.style.height = (stageHeight * scale) + 'px';
+  }
+
+  // Maps each 9-point StageAlignment case to a (align-items, justify-content)
+  // pair on <body>, which is how the empty space `.contain`/`.none` can
+  // leave around the Stage gets distributed.
+  const ALIGNMENT_TO_FLEX = {
+    topLeading: ['flex-start', 'flex-start'], top: ['flex-start', 'center'], topTrailing: ['flex-start', 'flex-end'],
+    leading: ['center', 'flex-start'], center: ['center', 'center'], trailing: ['center', 'flex-end'],
+    bottomLeading: ['flex-end', 'flex-start'], bottom: ['flex-end', 'center'], bottomTrailing: ['flex-end', 'flex-end']
+  };
+
+  function applyAlignment() {
+    const [alignItems, justifyContent] = ALIGNMENT_TO_FLEX[doc.webExportAlignment] || ALIGNMENT_TO_FLEX.center;
+    document.body.style.alignItems = alignItems;
+    document.body.style.justifyContent = justifyContent;
+  }
+
+  // ResizeObserver over the plain `window` resize event: it also catches a
+  // host page resizing the <iframe> this is embedded in, the viewport
+  // changing because a mobile browser's chrome (address bar) showed or
+  // hid, and orientation changes — cases a bare `resize` listener doesn't
+  // reliably cover.
+  if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(fitStageToViewport).observe(document.documentElement);
+  } else {
+    window.addEventListener('resize', fitStageToViewport);
+  }
+
+  stageEl.style.backgroundColor = stageColor;
+  applyAlignment();
+  stageEl.style.width = stageWidth + 'px';
+  stageEl.style.height = stageHeight + 'px';
+  fitStageToViewport(); // synchronous first fit — ResizeObserver's own initial callback is async and would otherwise flash unscaled content for a frame
+  play();
+})();

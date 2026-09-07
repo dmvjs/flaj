@@ -1,4 +1,5 @@
 .build/
+.claude
 Flaj.app/
 *.log
 .DS_Store

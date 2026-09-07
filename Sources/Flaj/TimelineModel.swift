@@ -1,5 +1,5 @@
 import SwiftUI
-import Combine
+import Observation
 import Dispatch
 import JavaScriptCore
 
@@ -54,19 +54,25 @@ struct ConsoleMessage: Identifiable {
     let frame: Int
 }
 
-final class TLLayer: Identifiable, ObservableObject {
+@Observable
+final class TLLayer: Identifiable {
     let id = UUID()
-    @Published var name: String
-    @Published var swatch: Color
-    @Published var kind: LayerKind
-    @Published var indent: Int
-    @Published var locked: Bool
-    @Published var hidden: Bool
-    @Published var expanded: Bool = true
-    @Published var frames: [FrameMark]
-    @Published var frameScripts: [Int: String] = [:]   // 1-based frame number -> JS/TS source
-    @Published var textFrames: [Int: PlacedText] = [:] // 1-based keyframe number -> placed text
-    @Published var tweenSettings: [Int: TweenSettings] = [:] // keyed by the tween span's start keyframe
+    var name: String
+    var swatch: Color
+    var kind: LayerKind
+    var indent: Int
+    var locked: Bool
+    var hidden: Bool
+    var expanded: Bool = true
+    var frames: [FrameMark]
+    var frameScripts: [Int: String] = [:]   // 1-based frame number -> JS/TS source
+    var textFrames: [Int: PlacedText] = [:] // 1-based keyframe number -> placed text
+    var tweenSettings: [Int: TweenSettings] = [:] // keyed by the tween span's start keyframe
+    // Color/opacity ease independently of position/size — same start
+    // keyframe key, same span, but its own family/direction/amount, the way
+    // Flash's Properties panel splits "Position and Size" from "Color
+    // Effect" as separate tween-affecting groups rather than one shared curve.
+    var colorTweenSettings: [Int: TweenSettings] = [:]
 
     func isKeyframe(at frame: Int) -> Bool {
         let idx = frame - 1
@@ -88,6 +94,24 @@ final class TLLayer: Identifiable, ObservableObject {
             case .keyframe, .emptyKeyframe: return i + 1
             case .plain, .tween: i -= 1
             default: return nil
+            }
+        }
+        return nil
+    }
+
+    /// The nearest actual keyframe at or before `frame`, regardless of
+    /// what's in between — even across `.empty` gaps that `governingKeyframe`
+    /// would stop dead at. Used to find what a brand new F5/F6 frame should
+    /// inherit when it isn't part of a live span yet (see
+    /// TimelineDocument.extendSpan) — Flash's own timeline behaves the same
+    /// way: a keyframe's content implicitly reaches forward to wherever you
+    /// next press F5/F6, not just to wherever an earlier F5 happened to stop.
+    func nearestKeyframe(before frame: Int) -> Int? {
+        var i = frame - 1
+        while i >= 0 && frames.indices.contains(i) {
+            switch frames[i] {
+            case .keyframe, .emptyKeyframe: return i + 1
+            default: i -= 1
             }
         }
         return nil
@@ -119,16 +143,35 @@ final class TLLayer: Identifiable, ObservableObject {
     func interpolatedPlacedText(at frame: Int) -> PlacedText? {
         guard let kf = governingKeyframe(at: frame), let base = textFrames[kf] else { return nil }
         guard let endKf = tweenTarget(from: kf), let end = textFrames[endKf], endKf > kf else { return base }
-        let settings = tweenSettings[kf] ?? TweenSettings()
         let rawT = Double(frame - kf) / Double(endKf - kf)
-        let t = settings.easedProgress(rawT)
+        let t = (tweenSettings[kf] ?? TweenSettings()).easedProgress(rawT)
+        let colorT = (colorTweenSettings[kf] ?? TweenSettings()).easedProgress(rawT)
         var result = base
         result.x = base.x + (end.x - base.x) * t
         result.y = base.y + (end.y - base.y) * t
         result.width = base.width + (end.width - base.width) * t
         result.height = base.height + (end.height - base.height) * t
         result.fontSize = base.fontSize + (end.fontSize - base.fontSize) * t
+        result.opacity = base.opacity + (end.opacity - base.opacity) * colorT
+        result.colorHex = Self.interpolateHex(base.colorHex, end.colorHex, colorT)
         return result
+    }
+
+    /// Linearly interpolates two "#rrggbb" colors by `t` (0...1), channel by
+    /// channel — the standard sRGB lerp, matching how CSS itself interpolates
+    /// a `color` animation between two hex values (see player.js), so the
+    /// native app and the web export agree on the exact same colors.
+    private static func interpolateHex(_ from: String, _ to: String, _ t: Double) -> String {
+        func components(_ hex: String) -> (UInt8, UInt8, UInt8) {
+            var s = hex.trimmingCharacters(in: .whitespaces)
+            if s.hasPrefix("#") { s.removeFirst() }
+            guard s.count == 6, let v = UInt32(s, radix: 16) else { return (0, 0, 0) }
+            return (UInt8((v >> 16) & 0xFF), UInt8((v >> 8) & 0xFF), UInt8(v & 0xFF))
+        }
+        let (r0, g0, b0) = components(from)
+        let (r1, g1, b1) = components(to)
+        func lerp(_ a: UInt8, _ b: UInt8) -> UInt8 { UInt8((Double(a) + (Double(b) - Double(a)) * t).rounded()) }
+        return String(format: "#%02X%02X%02X", lerp(r0, r1), lerp(g0, g1), lerp(b0, b1))
     }
 
     init(name: String, swatch: Color, kind: LayerKind = .normal, indent: Int = 0,
@@ -146,10 +189,11 @@ final class TLLayer: Identifiable, ObservableObject {
 }
 
 @MainActor
-final class TimelineDocument: ObservableObject {
-    @Published var layers: [TLLayer]
-    @Published var totalFrames: Int
-    @Published var playhead: Int = 1
+@Observable
+final class TimelineDocument {
+    var layers: [TLLayer]
+    var totalFrames: Int
+    var playhead: Int = 1
 
     // Grounded in reality: below 1fps the playback math degenerates and
     // there's nothing meaningfully "animated"; above 120fps you're asking
@@ -158,28 +202,28 @@ final class TimelineDocument: ObservableObject {
     // before that anyway.
     static let minFPS: Double = 1
     static let maxFPS: Double = 120
-    @Published var fps: Double = 12.0 {
+    var fps: Double = 12.0 {
         didSet {
             let clamped = min(max(fps, Self.minFPS), Self.maxFPS)
             if clamped != fps { fps = clamped }
         }
     }
-    @Published var isPlaying: Bool = false
-    @Published var selectedLayerID: UUID?
+    var isPlaying: Bool = false
+    var selectedLayerID: UUID?
 
     // The frame shown in the Actions panel / highlighted in the grid.
     // Deliberately separate from `playhead`: while playing, `playhead`
     // advances every tick, but the code editor and selection box should
     // stay put on whatever frame was last explicitly clicked, not flicker
     // through every frame as the movie runs.
-    @Published var selectedFrame: Int = 1
+    var selectedFrame: Int = 1
 
     // Shift-click range extension on the timeline grid, anchored at
     // `selectedFrame`. Only meaningful on `selectedLayerID`'s row — picking
     // a different layer (with or without shift) starts a fresh anchor there
     // instead of extending across layers, since a tween/range is inherently
     // a single-layer span.
-    @Published var rangeSelectionEnd: Int?
+    var rangeSelectionEnd: Int?
 
     var selectedFrameRange: ClosedRange<Int> {
         guard let end = rangeSelectionEnd else { return selectedFrame...selectedFrame }
@@ -206,24 +250,42 @@ final class TimelineDocument: ObservableObject {
 
     // The Stage — Flash's term for the fixed-size render surface, scriptable
     // from frame code via the `stage`/`bg` JS globals below.
-    @Published var stageWidth: CGFloat = 550
-    @Published var stageHeight: CGFloat = 400
-    @Published var stageColor: Color = .white
+    var stageWidth: CGFloat = 550
+    var stageHeight: CGFloat = 400
+    var stageColor: Color = .white
 
-    @Published var consoleMessages: [ConsoleMessage] = []
+    // Web export presentation — how the exported page's <title> reads and
+    // how the Stage sits in whatever page or iframe embeds it. See
+    // WebExport.swift. Persisted like the Stage properties above, since
+    // they're a property of the document, not a one-off export choice.
+    var webExportTitle: String = ""
+    var webExportFit: StageFit = .contain
+    var webExportAlignment: StageAlignment = .center
+    // Distinct from `stageColor` (the movie's own background, settable at
+    // runtime via `bg.color()`) — this is the page around it: what shows
+    // through a `.contain` letterbox, or behind a transparent Stage.
+    // Defaults transparent so the export blends into whatever page embeds it.
+    var webExportPageBackground: Color = .clear
+    var webExportMinify: Bool = true
+    // Drives the settings sheet shown before the save panel — see
+    // `exportWebPage()`/`WebExportSettingsSheet` in WebExport.swift.
+    // Transient UI state, not part of the saved document.
+    var webExportSheetPresented: Bool = false
 
-    @Published var currentFileURL: URL?
+    var consoleMessages: [ConsoleMessage] = []
 
-    @Published var stageObjects: [StageObject] = []
-    private var activeTweens: [ActiveTween] = []
+    var currentFileURL: URL?
+
+    var stageObjects: [StageObject] = []
+    @ObservationIgnored private var activeTweens: [ActiveTween] = []
 
     // MARK: - Text tool
 
     enum StageTool { case selection, text }
     struct TextPlacementRef: Equatable { let layerID: UUID; let keyframe: Int }
 
-    @Published var selectedTool: StageTool = .selection
-    @Published var selectedPlacement: TextPlacementRef?
+    var selectedTool: StageTool = .selection
+    var selectedPlacement: TextPlacementRef?
 
     /// Places a new default text box on `selectedLayer` at the keyframe that
     /// governs `selectedFrame`, and selects it. Mirrors the Actions panel's
@@ -257,9 +319,19 @@ final class TimelineDocument: ObservableObject {
         )
     }
 
+    /// Arrow-key nudge (see StageView) — moves the selected placement by
+    /// (dx, dy) points. A plain, testable method separate from the
+    /// KeyPress-handling glue so the actual math has a direct unit test,
+    /// not just an end-to-end one. A no-op when nothing's selected.
+    func nudgeSelectedPlacement(dx: CGFloat, dy: CGFloat) {
+        guard let ref = selectedPlacement, let binding = binding(for: ref) else { return }
+        binding.wrappedValue.x += dx
+        binding.wrappedValue.y += dy
+    }
+
     // MARK: - Copy/paste placed text
 
-    private var copiedPlacedText: PlacedText?
+    @ObservationIgnored private var copiedPlacedText: PlacedText?
 
     var hasCopiedText: Bool { copiedPlacedText != nil }
 
@@ -317,6 +389,9 @@ final class TimelineDocument: ObservableObject {
         if layer.tweenSettings[lo] == nil {
             layer.tweenSettings[lo] = TweenSettings()
         }
+        if layer.colorTweenSettings[lo] == nil {
+            layer.colorTweenSettings[lo] = TweenSettings()
+        }
     }
 
     /// Slides a tween's end keyframe from `oldEnd` to `newEnd` on the same
@@ -372,7 +447,17 @@ final class TimelineDocument: ObservableObject {
         )
     }
 
-    private var timerSource: DispatchSourceTimer?
+    /// Same idea as `tweenBinding(for:)`, for the independent color/opacity
+    /// easing curve (see `TLLayer.colorTweenSettings`).
+    func colorTweenBinding(for ref: TweenRef) -> Binding<TweenSettings>? {
+        guard let layer = layers.first(where: { $0.id == ref.layerID }) else { return nil }
+        return Binding(
+            get: { layer.colorTweenSettings[ref.startFrame] ?? TweenSettings() },
+            set: { layer.colorTweenSettings[ref.startFrame] = $0 }
+        )
+    }
+
+    @ObservationIgnored private var timerSource: DispatchSourceTimer?
 
     init(layers: [TLLayer], totalFrames: Int) {
         self.layers = layers
@@ -488,11 +573,11 @@ final class TimelineDocument: ObservableObject {
 
     // MARK: - JavaScript runtime
 
-    private lazy var jsContext: JSContext = makeJSContext()
+    @ObservationIgnored private lazy var jsContext: JSContext = makeJSContext()
 
     /// Top-level `const`/`let` names already declared at least once during
     /// this document's runtime lifetime — see preprocessForReentry below.
-    private var declaredTopLevelBindings: Set<String> = []
+    @ObservationIgnored private var declaredTopLevelBindings: Set<String> = []
 
     private func makeJSContext() -> JSContext {
         let ctx = JSContext()!
@@ -825,7 +910,6 @@ final class TimelineDocument: ObservableObject {
 
     func toggleExpanded(_ layer: TLLayer) {
         layer.expanded.toggle()
-        objectWillChange.send()
     }
 
     // MARK: - Layer management
@@ -879,6 +963,20 @@ final class TimelineDocument: ObservableObject {
         totalFrames = newTotal
     }
 
+    /// Fills any `.empty` gap between the nearest preceding keyframe and
+    /// `frame` (inclusive) with `.plain` continuation marks. What F5/F6 need
+    /// to do before touching `frame` itself — otherwise a keyframe's content
+    /// only reaches as far as an earlier F5 happened to extend it, instead
+    /// of implicitly continuing all the way to wherever you next press
+    /// F5/F6, which is how Flash's own timeline actually behaves. A no-op
+    /// if there's no preceding keyframe to bridge from.
+    private func extendSpan(layer: TLLayer, upTo frame: Int) {
+        guard let priorKeyframe = layer.nearestKeyframe(before: frame) else { return }
+        for f in (priorKeyframe + 1)...frame where layer.frames[f - 1] == .empty {
+            layer.frames[f - 1] = .plain
+        }
+    }
+
     /// F5 in classic Flash — extends content into a blank frame. (Simplified:
     /// marks the frame as continuing prior content rather than shifting
     /// everything after it, since frames don't carry real content yet.)
@@ -886,21 +984,29 @@ final class TimelineDocument: ObservableObject {
         growCapacity(to: max(totalFrames, frame))
         let idx = frame - 1
         guard layer.frames.indices.contains(idx), layer.frames[idx] == .empty else { return }
-        layer.frames[idx] = .plain
+        extendSpan(layer: layer, upTo: frame)
+        if layer.frames[idx] == .empty { layer.frames[idx] = .plain } // no preceding keyframe to bridge from
     }
 
     /// F6 (keyframe) / F7 (blank keyframe) in classic Flash. A non-blank
-    /// keyframe inherits whatever was actually showing at `frame` — computed
-    /// (and captured into textFrames) before the frame mark changes, since
-    /// that computation reads the current span/tween that's about to be
-    /// split. Splitting a tween this way is exactly how Flash lets you
-    /// "freeze" an in-between position into its own keyframe.
+    /// keyframe inherits whatever was actually showing at `frame` — first
+    /// bridging any gap back to the nearest keyframe (see `extendSpan`) so
+    /// that's true even when jumping straight to a far-off frame that was
+    /// never explicitly extended with F5 first, then computing (and
+    /// capturing into textFrames) what was actually showing there before
+    /// the frame mark changes, since that computation reads the current
+    /// span/tween that's about to be split. Splitting a tween this way is
+    /// exactly how Flash lets you "freeze" an in-between position into its
+    /// own keyframe.
     func insertKeyframe(layer: TLLayer, at frame: Int, blank: Bool) {
         growCapacity(to: max(totalFrames, frame))
         let idx = frame - 1
         guard layer.frames.indices.contains(idx) else { return }
-        if !blank, layer.textFrames[frame] == nil, let snapshot = layer.interpolatedPlacedText(at: frame) {
-            layer.textFrames[frame] = snapshot
+        if !blank {
+            extendSpan(layer: layer, upTo: frame)
+            if layer.textFrames[frame] == nil, let snapshot = layer.interpolatedPlacedText(at: frame) {
+                layer.textFrames[frame] = snapshot
+            }
         }
         layer.frames[idx] = blank ? .emptyKeyframe : .keyframe(hasScript: !(layer.frameScripts[frame] ?? "").isEmpty)
     }
@@ -926,6 +1032,7 @@ final class TimelineDocument: ObservableObject {
         layer.frameScripts[frame] = nil
         layer.textFrames[frame] = nil
         layer.tweenSettings[frame] = nil
+        layer.colorTweenSettings[frame] = nil
     }
 
     func setScript(_ text: String, layer: TLLayer, at frame: Int) {

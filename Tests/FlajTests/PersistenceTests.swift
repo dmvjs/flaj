@@ -21,6 +21,11 @@ final class PersistenceTests: XCTestCase {
         XCTAssertEqual(reloaded.stageWidth, original.stageWidth)
         XCTAssertEqual(reloaded.stageHeight, original.stageHeight)
         XCTAssertEqual(reloaded.stageColor.hexString, original.stageColor.hexString)
+        XCTAssertEqual(reloaded.webExportTitle, original.webExportTitle)
+        XCTAssertEqual(reloaded.webExportFit, original.webExportFit)
+        XCTAssertEqual(reloaded.webExportAlignment, original.webExportAlignment)
+        XCTAssertEqual(reloaded.webExportPageBackground.cssString, original.webExportPageBackground.cssString)
+        XCTAssertEqual(reloaded.webExportMinify, original.webExportMinify)
         XCTAssertEqual(reloaded.layers.count, original.layers.count)
         // load(from:) re-selects the first layer, same as opening a document fresh.
         XCTAssertEqual(reloaded.selectedLayerID, reloaded.layers.first?.id)
@@ -37,6 +42,7 @@ final class PersistenceTests: XCTestCase {
             XCTAssertEqual(got.frameScripts, want.frameScripts)
             XCTAssertEqual(got.textFrames, want.textFrames)
             XCTAssertEqual(got.tweenSettings, want.tweenSettings)
+            XCTAssertEqual(got.colorTweenSettings, want.colorTweenSettings)
         }
     }
 

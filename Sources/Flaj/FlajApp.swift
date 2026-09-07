@@ -26,7 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct FlajApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var doc = TimelineDocument.sample()
+    @State private var doc = TimelineDocument.sample()
 
     var body: some Scene {
         WindowGroup("Flaj") {
@@ -51,7 +51,10 @@ struct FlajApp: App {
                         .frame(minHeight: 100, idealHeight: 140)
                 }
             }
-            .frame(minWidth: 900, minHeight: 860)
+            .frame(minWidth: 900, idealWidth: 1600, minHeight: 860, idealHeight: 900)
+            .sheet(isPresented: $doc.webExportSheetPresented) {
+                WebExportSettingsSheet(doc: doc)
+            }
         }
         .windowResizability(.contentSize)
         .commands {
@@ -65,6 +68,7 @@ struct FlajApp: App {
                     .keyboardShortcut("s", modifiers: [.command, .shift])
                 Divider()
                 Button("Export GIF…") { doc.exportGIF() }
+                Button("Export Web Page…") { doc.exportWebPage() }
             }
             CommandMenu("Insert") {
                 Button("Frame") { doc.insertFrameAtSelection() }
