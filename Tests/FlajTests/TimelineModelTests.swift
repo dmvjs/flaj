@@ -9,6 +9,44 @@ import XCTest
 @MainActor
 final class TimelineModelTests: XCTestCase {
 
+    func testSelectFrameSelectsPlacedTextOnAKeyframeThatHasIt() {
+        let layer = TLLayer(name: "text", swatch: .green, frames: [.keyframe(hasScript: false), .empty])
+        layer.textFrames[1] = PlacedText(text: "Hi", x: 0, y: 0, width: 20, height: 10)
+        let doc = TimelineDocument(layers: [layer], totalFrames: 2)
+
+        doc.selectFrame(layer: layer, frame: 1, extend: false)
+        XCTAssertEqual(doc.selectedPlacement, TimelineDocument.TextPlacementRef(layerID: layer.id, keyframe: 1))
+    }
+
+    func testSelectFrameClearsSelectionOnAFrameWithNoPlacedText() {
+        let layer = TLLayer(name: "text", swatch: .green, frames: [.keyframe(hasScript: false), .empty])
+        layer.textFrames[1] = PlacedText(text: "Hi", x: 0, y: 0, width: 20, height: 10)
+        let doc = TimelineDocument(layers: [layer], totalFrames: 2)
+        doc.selectedPlacement = TimelineDocument.TextPlacementRef(layerID: layer.id, keyframe: 1)
+
+        doc.selectFrame(layer: layer, frame: 2, extend: false)
+        XCTAssertNil(doc.selectedPlacement)
+    }
+
+    /// A frame that's merely *inside* a tween (not the governing keyframe
+    /// itself) must NOT auto-select — that's what lets `activeTweenRef`
+    /// drive the Properties panel's Tweening section for those frames;
+    /// selecting a placement there would silently hide it (the panel
+    /// treats text/tween as mutually exclusive).
+    func testSelectFrameInsideATweenSpanDoesNotAutoSelectThePlacement() {
+        let frames: [FrameMark] = [.keyframe(hasScript: false), .tween, .keyframe(hasScript: false)]
+        let layer = TLLayer(name: "text", swatch: .green, frames: frames)
+        layer.textFrames[1] = PlacedText(text: "A", x: 0, y: 0, width: 10, height: 10)
+        layer.textFrames[3] = PlacedText(text: "A", x: 50, y: 0, width: 10, height: 10)
+        let doc = TimelineDocument(layers: [layer], totalFrames: 3)
+
+        doc.selectFrame(layer: layer, frame: 2, extend: false)
+        XCTAssertNil(doc.selectedPlacement, "frame 2 is inside the span, not the governing keyframe (frame 1)")
+
+        doc.selectFrame(layer: layer, frame: 1, extend: false)
+        XCTAssertEqual(doc.selectedPlacement?.keyframe, 1, "but landing exactly on the governing keyframe does select it")
+    }
+
     func testNudgeSelectedPlacementMovesByGivenDelta() {
         let layer = TLLayer(name: "text", swatch: .green, frames: [.keyframe(hasScript: false)])
         layer.textFrames[1] = PlacedText(text: "Hi", x: 10, y: 10, width: 20, height: 10)
@@ -87,6 +125,105 @@ final class TimelineModelTests: XCTestCase {
         for frame in 2...9 {
             XCTAssertEqual(layer.governingKeyframe(at: frame), 1)
         }
+    }
+
+    func testScaleAndRotationTweenAlongsidePositionNotColor() {
+        // Deliberately mismatched curves on the position/size vs. color
+        // tween — if scale/rotation secretly interpolated on colorT instead
+        // of t (the position/size group they actually belong to, per
+        // PlacedText.rotation's own doc comment), the midpoint values below
+        // would land on the color curve's progress instead of position's.
+        let frames: [FrameMark] = [.keyframe(hasScript: false), .tween, .keyframe(hasScript: false)]
+        let layer = TLLayer(name: "text", swatch: .green, frames: frames)
+        layer.textFrames[1] = PlacedText(x: 0, y: 0, width: 10, height: 10, scale: 1, rotation: 0)
+        layer.textFrames[3] = PlacedText(x: 0, y: 0, width: 10, height: 10, scale: 3, rotation: 180)
+        layer.tweenSettings[1] = TweenSettings(family: .linear)
+        layer.colorTweenSettings[1] = TweenSettings(family: .quad, direction: .easeIn, amount: 100)
+
+        // Midpoint, rawT = 0.5. Position/size group is `.linear` -> 0.5
+        // exactly. Color group is quad-easeIn -> 0.25 at rawT=0.5 — if
+        // scale/rotation used that curve instead, these values would be
+        // 1 + (3-1)*0.25 = 1.5 and 0 + 180*0.25 = 45, not the asserted ones.
+        let mid = layer.interpolatedPlacedText(at: 2)
+        XCTAssertEqual(mid?.scale ?? -1, 2, accuracy: 0.0001)
+        XCTAssertEqual(mid?.rotation ?? -1, 90, accuracy: 0.0001)
+    }
+
+    func testMoveKeyframeCarriesItsContentToTheNewFrame() {
+        let layer = TLLayer(
+            name: "actions", swatch: .yellow,
+            frames: [.keyframe(hasScript: true), .plain, .plain, .empty, .empty]
+        )
+        layer.frameScripts[1] = "trace('hi');"
+        layer.textFrames[1] = PlacedText(text: "A", x: 1, y: 2, width: 10, height: 10)
+        layer.frameLabels[1] = "start"
+        let doc = TimelineDocument(layers: [layer], totalFrames: 5)
+
+        doc.moveKeyframe(layer: layer, from: 1, to: 5)
+
+        XCTAssertEqual(layer.frames[4], .keyframe(hasScript: true))
+        XCTAssertEqual(layer.frameScripts[5], "trace('hi');")
+        XCTAssertEqual(layer.textFrames[5]?.text, "A")
+        XCTAssertEqual(layer.frameLabels[5], "start")
+
+        // The old position, and the `.plain` span it used to govern, are
+        // both cleared rather than left as dangling/ungoverned marks.
+        XCTAssertEqual(layer.frames[0], .empty)
+        XCTAssertEqual(layer.frames[1], .empty)
+        XCTAssertEqual(layer.frames[2], .empty)
+        XCTAssertNil(layer.frameScripts[1])
+        XCTAssertNil(layer.textFrames[1])
+        XCTAssertNil(layer.frameLabels[1])
+    }
+
+    func testMoveKeyframeRefusesATweenStartKeyframe() {
+        let frames: [FrameMark] = [.keyframe(hasScript: false), .tween, .keyframe(hasScript: false)]
+        let layer = TLLayer(name: "text", swatch: .green, frames: frames)
+        layer.textFrames[1] = PlacedText(text: "A", x: 0, y: 0, width: 10, height: 10)
+        layer.textFrames[3] = PlacedText(text: "A", x: 50, y: 0, width: 10, height: 10)
+        layer.tweenSettings[1] = TweenSettings(family: .quad)
+        let doc = TimelineDocument(layers: [layer], totalFrames: 3)
+
+        doc.moveKeyframe(layer: layer, from: 1, to: 10) // must not disturb the tween it anchors
+        XCTAssertEqual(layer.frames[0], .keyframe(hasScript: false))
+        XCTAssertNotNil(layer.tweenSettings[1])
+    }
+
+    func testMoveKeyframeUpdatesSelectedFrameIfItWasTheOneMoved() {
+        let layer = TLLayer(name: "actions", swatch: .yellow, frames: [.keyframe(hasScript: false), .empty])
+        let doc = TimelineDocument(layers: [layer], totalFrames: 2)
+        doc.selectedFrame = 1
+
+        doc.moveKeyframe(layer: layer, from: 1, to: 2)
+        XCTAssertEqual(doc.selectedFrame, 2)
+    }
+
+    /// Regression: double-clicking a cell that's already a keyframe (the
+    /// Timeline's double-click gesture always calls `insertKeyframe(...,
+    /// blank: false)` regardless of the frame's current state) used to
+    /// crash — `nearestKeyframe(before:)` is actually "at or before", so
+    /// when `frame` is already a keyframe it returned `frame` itself, and
+    /// extendSpan's `(priorKeyframe + 1)...frame` became an invalid range
+    /// (e.g. 2...1) that Swift traps on constructing.
+    func testInsertKeyframeOnAnAlreadyExistingKeyframeDoesNotCrash() {
+        let layer = TLLayer(name: "actions", swatch: .yellow, frames: [.keyframe(hasScript: false)])
+        let doc = TimelineDocument(layers: [layer], totalFrames: 1)
+
+        doc.insertKeyframe(layer: layer, at: 1, blank: false) // must not trap
+        XCTAssertTrue(layer.isKeyframe(at: 1))
+    }
+
+    /// Same crash, reached through a keyframe that isn't the very first
+    /// frame — makes sure the fix isn't accidentally special-casing frame 1.
+    func testInsertKeyframeOnALaterExistingKeyframeDoesNotCrash() {
+        let layer = TLLayer(
+            name: "actions", swatch: .yellow,
+            frames: [.keyframe(hasScript: false), .plain, .keyframe(hasScript: false)]
+        )
+        let doc = TimelineDocument(layers: [layer], totalFrames: 3)
+
+        doc.insertKeyframe(layer: layer, at: 3, blank: false) // must not trap
+        XCTAssertTrue(layer.isKeyframe(at: 3))
     }
 
     func testInsertFrameBridgesAGapBackToTheNearestKeyframeToo() {

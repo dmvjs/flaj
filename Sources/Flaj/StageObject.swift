@@ -47,10 +47,17 @@ struct PlacedText: Codable, Equatable {
     var colorHex: String = "#000000"
     var alignment: TextHAlign = .leading
     var opacity: Double = 1
+    var scale: CGFloat = 1
+    /// Degrees — the box's own base rotation, tweened start-to-end like x/y
+    /// (see TLLayer.interpolatedPlacedText). Independent of, and additive
+    /// with, TweenSettings.rotate/rotateTimes's "spin N extra times over
+    /// the span" effect (StageView.StagePlacedTextView combines the two).
+    var rotation: CGFloat = 0
 
     init(text: String = "Text", x: CGFloat, y: CGFloat, width: CGFloat = 160, height: CGFloat = 40,
          fontName: String = "Helvetica", fontSize: CGFloat = 24, bold: Bool = false, italic: Bool = false,
-         colorHex: String = "#000000", alignment: TextHAlign = .leading, opacity: Double = 1) {
+         colorHex: String = "#000000", alignment: TextHAlign = .leading, opacity: Double = 1,
+         scale: CGFloat = 1, rotation: CGFloat = 0) {
         self.text = text
         self.x = x
         self.y = y
@@ -63,16 +70,19 @@ struct PlacedText: Codable, Equatable {
         self.colorHex = colorHex
         self.alignment = alignment
         self.opacity = opacity
+        self.scale = scale
+        self.rotation = rotation
     }
 
     private enum CodingKeys: String, CodingKey {
-        case text, x, y, width, height, fontName, fontSize, bold, italic, colorHex, alignment, opacity
+        case text, x, y, width, height, fontName, fontSize, bold, italic, colorHex, alignment, opacity,
+             scale, rotation
     }
 
-    // Custom decode so .flaj files saved before `opacity` existed still open —
-    // decodeIfPresent with each field's own declared default throughout,
-    // not just for `opacity`, so this stays correct regardless of which
-    // fields existed when a given file was written.
+    // Custom decode so .flaj files saved before `opacity`/`scale`/`rotation`
+    // existed still open — decodeIfPresent with each field's own declared
+    // default throughout, not just the newest fields, so this stays correct
+    // regardless of which fields existed when a given file was written.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         text = try c.decodeIfPresent(String.self, forKey: .text) ?? "Text"
@@ -87,6 +97,8 @@ struct PlacedText: Codable, Equatable {
         colorHex = try c.decodeIfPresent(String.self, forKey: .colorHex) ?? "#000000"
         alignment = try c.decodeIfPresent(TextHAlign.self, forKey: .alignment) ?? .leading
         opacity = try c.decodeIfPresent(Double.self, forKey: .opacity) ?? 1
+        scale = try c.decodeIfPresent(CGFloat.self, forKey: .scale) ?? 1
+        rotation = try c.decodeIfPresent(CGFloat.self, forKey: .rotation) ?? 0
     }
 }
 

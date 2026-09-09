@@ -41,4 +41,52 @@ final class JavaScriptRuntimeTests: XCTestCase {
             "true"
         ])
     }
+
+    /// The banner-ad clickTag convention (see TimelineDocument.
+    /// clickTagURL) — a script assigns `stage.clickTag`, a plain property,
+    /// not a method call, and it should read back on the native side after
+    /// the frame's scripts finish running.
+    func testStageClickTagPropagatesToTheNativeSide() {
+        let doc = DocumentFixtures.singleScript("stage.clickTag = 'https://example.com/ad';")
+        doc.stepSimulationFrame()
+
+        XCTAssertEqual(doc.clickTagURL, "https://example.com/ad")
+    }
+
+    func testClickTagStaysUnsetWhenNoScriptSetsIt() {
+        let doc = DocumentFixtures.singleScript("console.log('no click tag here');")
+        doc.stepSimulationFrame()
+
+        XCTAssertNil(doc.clickTagURL)
+    }
+
+    /// `stage` is a persistent JS object — once clickTag is set on one
+    /// frame, it should still read back on a later frame whose own script
+    /// doesn't touch it at all, matching real clickTag usage (set once,
+    /// valid for the whole movie).
+    func testClickTagPersistsAcrossFramesOnceSet() {
+        let layer = TLLayer(
+            name: "actions", swatch: .yellow,
+            frames: [.keyframe(hasScript: true), .keyframe(hasScript: true)]
+        )
+        layer.frameScripts[1] = "stage.clickTag = 'https://example.com';"
+        layer.frameScripts[2] = "trace('frame two');"
+        let doc = TimelineDocument(layers: [layer], totalFrames: 2)
+
+        doc.stepSimulationFrame() // frame 1
+        XCTAssertEqual(doc.clickTagURL, "https://example.com")
+
+        doc.gotoAndStop(2)
+        doc.stepSimulationFrame() // frame 2, doesn't touch clickTag itself
+        XCTAssertEqual(doc.clickTagURL, "https://example.com")
+    }
+
+    func testResetRuntimeClearsClickTag() {
+        let doc = DocumentFixtures.singleScript("stage.clickTag = 'https://example.com';")
+        doc.stepSimulationFrame()
+        XCTAssertNotNil(doc.clickTagURL)
+
+        doc.resetRuntime()
+        XCTAssertNil(doc.clickTagURL)
+    }
 }

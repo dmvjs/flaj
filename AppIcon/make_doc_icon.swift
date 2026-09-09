@@ -1,97 +1,89 @@
 import AppKit
 
+// Shares the app icon's exact badge (see make_icon.swift) — same pink
+// border, same dark near-black interior, same "Fl" wordmark — so the app
+// and its documents read as one consistent identity. The only addition is
+// a small folded-corner "dog-ear," the standard Mac convention for "this
+// is a file produced by that app," not the app itself — without it this
+// would be visually identical to AppIcon.icns in a Finder listing.
 func makeDocIcon() -> NSImage {
     let size: CGFloat = 1024
     let img = NSImage(size: NSSize(width: size, height: size))
     img.lockFocus()
     guard let ctx = NSGraphicsContext.current?.cgContext else { fatalError() }
 
-    // Page silhouette (Finder's generic document convention).
-    let margin = size * 0.14
-    let pageRect = CGRect(x: margin, y: size * 0.04, width: size - margin * 2, height: size - size * 0.10)
-    let fold = pageRect.width * 0.28
-    let corner = pageRect.width * 0.05
+    let flajPink = NSColor(calibratedRed: 1.0, green: 0.35, blue: 0.6, alpha: 1)
 
-    let page = CGMutablePath()
-    page.move(to: CGPoint(x: pageRect.minX + corner, y: pageRect.minY))
-    page.addLine(to: CGPoint(x: pageRect.maxX - fold, y: pageRect.minY))
-    page.addLine(to: CGPoint(x: pageRect.maxX, y: pageRect.minY + fold))
-    page.addLine(to: CGPoint(x: pageRect.maxX, y: pageRect.maxY - corner))
-    page.addArc(center: CGPoint(x: pageRect.maxX - corner, y: pageRect.maxY - corner), radius: corner,
-                startAngle: 0, endAngle: .pi / 2, clockwise: false)
-    page.addLine(to: CGPoint(x: pageRect.minX + corner, y: pageRect.maxY))
-    page.addArc(center: CGPoint(x: pageRect.minX + corner, y: pageRect.maxY - corner), radius: corner,
-                startAngle: .pi / 2, endAngle: .pi, clockwise: false)
-    page.addLine(to: CGPoint(x: pageRect.minX, y: pageRect.minY + corner))
-    page.addArc(center: CGPoint(x: pageRect.minX + corner, y: pageRect.minY + corner), radius: corner,
-                startAngle: .pi, endAngle: .pi * 1.5, clockwise: false)
-    page.closeSubpath()
+    let outerRect = CGRect(x: 0, y: 0, width: size, height: size)
+    let cornerRadius = size * 0.225
+    let outerPath = CGPath(roundedRect: outerRect, cornerWidth: cornerRadius, cornerHeight: cornerRadius, transform: nil)
 
     ctx.saveGState()
-    ctx.setShadow(offset: CGSize(width: 0, height: -size * 0.015), blur: size * 0.03,
-                   color: NSColor.black.withAlphaComponent(0.28).cgColor)
-    ctx.setFillColor(NSColor(calibratedRed: 1.0, green: 0.35, blue: 0.6, alpha: 1).cgColor)
-    ctx.addPath(page)
+    ctx.setShadow(offset: CGSize(width: 0, height: -size * 0.015), blur: size * 0.035,
+                   color: NSColor.black.withAlphaComponent(0.35).cgColor)
+    ctx.setFillColor(flajPink.cgColor)
+    ctx.addPath(outerPath)
     ctx.fillPath()
     ctx.restoreGState()
 
-    ctx.setStrokeColor(NSColor.black.withAlphaComponent(0.12).cgColor)
-    ctx.setLineWidth(size * 0.006)
-    ctx.addPath(page)
+    let borderWidth = size * 0.09
+    let innerRect = outerRect.insetBy(dx: borderWidth, dy: borderWidth)
+    let innerRadius = max(0, cornerRadius - borderWidth * 0.6)
+    let innerPath = CGPath(roundedRect: innerRect, cornerWidth: innerRadius, cornerHeight: innerRadius, transform: nil)
+    ctx.setFillColor(NSColor(calibratedRed: 0.10, green: 0.02, blue: 0.07, alpha: 1).cgColor)
+    ctx.addPath(innerPath)
+    ctx.fillPath()
+
+    let text = "Fl"
+    let font = NSFont.systemFont(ofSize: size * 0.52, weight: .heavy)
+    let paragraph = NSMutableParagraphStyle()
+    paragraph.alignment = .center
+    let attrs: [NSAttributedString.Key: Any] = [
+        .font: font,
+        .foregroundColor: flajPink,
+        .paragraphStyle: paragraph,
+        .kern: -size * 0.01
+    ]
+    let attrString = NSAttributedString(string: text, attributes: attrs)
+    let textSize = attrString.size()
+    let textOrigin = CGPoint(x: size * 0.5 - textSize.width / 2,
+                              y: size * 0.5 - textSize.height / 2 + size * 0.01)
+    attrString.draw(at: textOrigin)
+
+    // The dog-ear: a light triangular fold in the top-right corner, as if
+    // a page corner were peeled back — clipped to the icon's own rounded
+    // outline so it doesn't poke outside the badge shape.
+    ctx.saveGState()
+    ctx.addPath(outerPath)
+    ctx.clip()
+
+    let earSize = size * 0.24
+    let earTopRight = CGPoint(x: size, y: size)
+    let earPath = CGMutablePath()
+    earPath.move(to: CGPoint(x: earTopRight.x - earSize, y: earTopRight.y))
+    earPath.addLine(to: earTopRight)
+    earPath.addLine(to: CGPoint(x: earTopRight.x, y: earTopRight.y - earSize))
+    earPath.closeSubpath()
+
+    ctx.saveGState()
+    ctx.setShadow(offset: CGSize(width: -size * 0.008, height: -size * 0.008), blur: size * 0.015,
+                   color: NSColor.black.withAlphaComponent(0.3).cgColor)
+    ctx.setFillColor(NSColor.white.withAlphaComponent(0.92).cgColor)
+    ctx.addPath(earPath)
+    ctx.fillPath()
+    ctx.restoreGState()
+
+    // A thin pink crease along the fold's inner edge, echoing the badge's
+    // own border color instead of a plain gray line.
+    let crease = CGMutablePath()
+    crease.move(to: CGPoint(x: earTopRight.x - earSize, y: earTopRight.y))
+    crease.addLine(to: CGPoint(x: earTopRight.x, y: earTopRight.y - earSize))
+    ctx.setStrokeColor(flajPink.withAlphaComponent(0.7).cgColor)
+    ctx.setLineWidth(size * 0.008)
+    ctx.addPath(crease)
     ctx.strokePath()
 
-    let foldPath = CGMutablePath()
-    foldPath.move(to: CGPoint(x: pageRect.maxX - fold, y: pageRect.minY))
-    foldPath.addLine(to: CGPoint(x: pageRect.maxX, y: pageRect.minY + fold))
-    foldPath.addLine(to: CGPoint(x: pageRect.maxX - fold, y: pageRect.minY + fold))
-    foldPath.closeSubpath()
-    ctx.setFillColor(NSColor.black.withAlphaComponent(0.08).cgColor)
-    ctx.addPath(foldPath)
-    ctx.fillPath()
-
-    // A single furious, glowing red eye at the center of the page.
-    let center = CGPoint(x: size * 0.5, y: pageRect.midY + size * 0.05)
-    let eyeRadius = size * 0.16
-    ctx.saveGState()
-    ctx.setShadow(offset: .zero, blur: size * 0.03, color: NSColor(calibratedRed: 1, green: 0.15, blue: 0.05, alpha: 0.9).cgColor)
-    ctx.setFillColor(NSColor(calibratedRed: 1.0, green: 0.85, blue: 0.55, alpha: 1).cgColor)
-    ctx.addEllipse(in: CGRect(x: center.x - eyeRadius, y: center.y - eyeRadius, width: eyeRadius * 2, height: eyeRadius * 2))
-    ctx.fillPath()
     ctx.restoreGState()
-
-    let pupilWidth = eyeRadius * 0.34
-    let pupilHeight = eyeRadius * 1.5
-    ctx.setFillColor(NSColor(calibratedRed: 1.0, green: 0.15, blue: 0.05, alpha: 1).cgColor)
-    ctx.addEllipse(in: CGRect(x: center.x - pupilWidth / 2, y: center.y - pupilHeight / 2, width: pupilWidth, height: pupilHeight))
-    ctx.fillPath()
-
-    // Angry brows — two dark wedges scowling down toward the center.
-    for side in [-1.0, 1.0] as [CGFloat] {
-        let browOuter = CGPoint(x: center.x + side * eyeRadius * 1.9, y: center.y + eyeRadius * 1.3)
-        let browInner = CGPoint(x: center.x + side * eyeRadius * 0.5, y: center.y + eyeRadius * 0.55)
-        let brow = CGMutablePath()
-        brow.move(to: browOuter)
-        brow.addLine(to: browInner)
-        brow.addLine(to: CGPoint(x: browOuter.x, y: browOuter.y - eyeRadius * 0.5))
-        brow.closeSubpath()
-        ctx.setFillColor(NSColor(calibratedRed: 0.25, green: 0.0, blue: 0.08, alpha: 1).cgColor)
-        ctx.addPath(brow)
-        ctx.fillPath()
-    }
-
-    // "FLAJ" wordmark near the bottom of the page.
-    let labelFont = NSFont.systemFont(ofSize: size * 0.075, weight: .bold)
-    let labelColor = NSColor(calibratedRed: 0.35, green: 0.35, blue: 0.37, alpha: 1)
-    let labelParagraph = NSMutableParagraphStyle()
-    labelParagraph.alignment = .center
-    let labelAttrs: [NSAttributedString.Key: Any] = [
-        .font: labelFont, .foregroundColor: labelColor, .paragraphStyle: labelParagraph,
-        .kern: size * 0.008
-    ]
-    let label = NSAttributedString(string: "FLAJ", attributes: labelAttrs)
-    let labelSize = label.size()
-    let labelOrigin = CGPoint(x: size / 2 - labelSize.width / 2 + size * 0.01, y: pageRect.minY + size * 0.06)
-    label.draw(at: labelOrigin)
 
     img.unlockFocus()
     return img

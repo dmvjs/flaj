@@ -100,8 +100,8 @@ enum DocumentFixtures {
         )
         art.expanded = false
         art.textFrames = [
-            1: PlacedText(text: "A", x: 1, y: 2, width: 30, height: 12, colorHex: "#112233", opacity: 1),
-            3: PlacedText(text: "B", x: 10, y: 20, width: 30, height: 12, colorHex: "#445566", opacity: 0.4)
+            1: PlacedText(text: "A", x: 1, y: 2, width: 30, height: 12, colorHex: "#112233", opacity: 1, scale: 1, rotation: 0),
+            3: PlacedText(text: "B", x: 10, y: 20, width: 30, height: 12, colorHex: "#445566", opacity: 0.4, scale: 1.5, rotation: 45)
         ]
         art.tweenSettings = [1: TweenSettings(family: .elastic, direction: .easeInOut, amount: 65, rotate: .cw, rotateTimes: 2)]
         art.colorTweenSettings = [1: TweenSettings(family: .sine, direction: .easeIn, amount: 80)]

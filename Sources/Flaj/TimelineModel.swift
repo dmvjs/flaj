@@ -157,6 +157,8 @@ final class TLLayer: Identifiable {
         result.width = base.width + (end.width - base.width) * t
         result.height = base.height + (end.height - base.height) * t
         result.fontSize = base.fontSize + (end.fontSize - base.fontSize) * t
+        result.scale = base.scale + (end.scale - base.scale) * t
+        result.rotation = base.rotation + (end.rotation - base.rotation) * t
         result.opacity = base.opacity + (end.opacity - base.opacity) * colorT
         result.colorHex = Self.interpolateHex(base.colorHex, end.colorHex, colorT)
         return result
@@ -240,17 +242,28 @@ final class TimelineDocument {
     /// plain click moves the playhead and starts a fresh range anchor;
     /// shift-click (only honored on the already-selected layer) extends the
     /// range without moving the playhead, matching Flash's frame-selection
-    /// behavior. Clears any stage text selection — the Properties panel
-    /// shows text properties OR tween properties, matching whichever you
-    /// selected most recently, never both at once.
+    /// behavior. A plain click that lands exactly on a keyframe carrying
+    /// placed text also selects that content on the Stage — matching
+    /// Flash, where clicking a keyframe on the Timeline highlights
+    /// whatever it holds there, showing its Properties fields and Stage
+    /// selection box without an extra click on the Stage itself.
+    /// Deliberately narrower than "any frame in that content's span": a
+    /// frame that's merely inside a tween (not the governing keyframe
+    /// itself) leaves the placement selection alone, since that's what
+    /// lets `activeTweenRef` drive the Properties panel's Tweening
+    /// section for those frames — selecting a placement there would
+    /// silently hide it (text and tween sections are mutually exclusive).
     func selectFrame(layer: TLLayer, frame: Int, extend: Bool) {
-        selectedPlacement = nil
         if extend && selectedLayerID == layer.id {
+            selectedPlacement = nil
             rangeSelectionEnd = frame
         } else {
             selectedLayerID = layer.id
             gotoAndStop(frame)
             rangeSelectionEnd = nil
+            selectedPlacement = layer.textFrames[frame] != nil
+                ? TextPlacementRef(layerID: layer.id, keyframe: frame)
+                : nil
         }
     }
 
@@ -284,6 +297,18 @@ final class TimelineDocument {
 
     var stageObjects: [StageObject] = []
     @ObservationIgnored private var activeTweens: [ActiveTween] = []
+
+    /// The banner-ad `clickTAG` convention — a frame script sets
+    /// `stage.clickTag = "https://…"` and the whole Stage becomes one big
+    /// link, opening that URL in a new window when clicked (matches
+    /// player.js's identical `stage.clickTag` for the web export). A
+    /// plain, freely-assignable JS property, not a method — no setter
+    /// hook needed on the JS side; this is just read back from the JS
+    /// context after each frame's scripts run (see runScriptsOnCurrentFrame),
+    /// same way bg.color()/stage.size() push state the *other* direction.
+    /// nil until a script sets it, and reset on every resetRuntime() —
+    /// stale from a previous run/document shouldn't linger.
+    var clickTagURL: String?
 
     // MARK: - Undo/Redo
     //
@@ -594,6 +619,46 @@ final class TimelineDocument {
             }
             layer.tweenSettings[start] = nil
             layer.colorTweenSettings[start] = nil
+        }
+    }
+
+    /// Repositions a plain, non-tween keyframe — the classic Flash drag,
+    /// separate from `moveTweenEnd`'s span-resize because the two need
+    /// different guards: a tween's start keyframe isn't handled here at
+    /// all (moving it would leave the span it anchors dangling), and there's
+    /// no "must stay N frames from something" minimum the way a tween end
+    /// has. Overwrites whatever was already at `to`, same as `moveTweenEnd`/
+    /// `pasteFrames` — this codebase doesn't do insert-and-shift.
+    func moveKeyframe(layer: TLLayer, from: Int, to: Int) {
+        guard from != to, to >= 1,
+              layer.isKeyframe(at: from),
+              layer.tweenTarget(from: from) == nil else { return }
+        withUndoSnapshot {
+            growCapacity(to: max(totalFrames, to))
+            let mark = layer.frames[from - 1]
+            let script = layer.frameScripts[from]
+            let text = layer.textFrames[from]
+            let label = layer.frameLabels[from]
+
+            layer.frames[from - 1] = .empty
+            layer.frameScripts[from] = nil
+            layer.textFrames[from] = nil
+            layer.frameLabels[from] = nil
+            // Any `.plain` continuation this keyframe was governing is now
+            // ungoverned (nothing behind it to continue from) — clear it
+            // back to `.empty` rather than leaving a dangling span.
+            var trailing = from
+            while trailing < layer.frames.count, layer.frames[trailing] == .plain {
+                layer.frames[trailing] = .empty
+                trailing += 1
+            }
+
+            layer.frames[to - 1] = mark
+            layer.frameScripts[to] = script
+            layer.textFrames[to] = text
+            layer.frameLabels[to] = label
+
+            if selectedFrame == from { selectedFrame = to }
         }
     }
 
@@ -971,6 +1036,13 @@ final class TimelineDocument {
                   let script = layer.frameScripts[playhead], !script.isEmpty else { continue }
             jsContext.evaluateScript(preprocessForReentry(script))
         }
+        // `stage` is a persistent JS object (not recreated per frame), so
+        // clickTag naturally stays set across frames the way real clickTag
+        // usage expects (set once, valid for the whole movie) — this just
+        // mirrors its current value onto the native side after every run,
+        // whether or not *this* frame's scripts touched it.
+        let value = jsContext.objectForKeyedSubscript("stage")?.objectForKeyedSubscript("clickTag")
+        clickTagURL = (value?.isString == true) ? value?.toString() : nil
     }
 
     /// A frame's script re-runs every time the playhead re-enters that frame
@@ -1016,6 +1088,7 @@ final class TimelineDocument {
         declaredTopLevelBindings.removeAll()
         stageObjects.removeAll()
         activeTweens.removeAll()
+        clickTagURL = nil
     }
 
     // MARK: - Stage objects & tweening
@@ -1179,7 +1252,11 @@ final class TimelineDocument {
     /// F5/F6, which is how Flash's own timeline actually behaves. A no-op
     /// if there's no preceding keyframe to bridge from.
     private func extendSpan(layer: TLLayer, upTo frame: Int) {
-        guard let priorKeyframe = layer.nearestKeyframe(before: frame) else { return }
+        // `nearestKeyframe(before:)` is actually "at or before" (see its own
+        // doc comment) — when `frame` itself is already a keyframe it
+        // returns `frame`, and (priorKeyframe + 1)...frame would then be an
+        // invalid, crashing range with nothing to bridge anyway.
+        guard let priorKeyframe = layer.nearestKeyframe(before: frame), priorKeyframe < frame else { return }
         for f in (priorKeyframe + 1)...frame where layer.frames[f - 1] == .empty {
             layer.frames[f - 1] = .plain
         }

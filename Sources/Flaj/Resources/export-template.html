@@ -5,9 +5,27 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__FLAJ_TITLE__</title>
 <style>
-  html, body {
+  /* html only needs a resolvable height (so body's own height: 100% has
+     something to be a percentage *of*) — its alignment doesn't matter,
+     since it has exactly one child that always fills it. All the actual
+     layout — sizing, centering/alignment via flex, background — belongs
+     on body alone. Splitting them isn't just tidiness: body needs an
+     explicit width: 100% too, or it shrinks to fit its content (the Stage
+     frame) instead of filling the viewport — and once it's that narrow,
+     html's own justify-content would center *body itself* in the
+     viewport regardless of what alignment player.js's applyAlignment()
+     sets on body, since that only ever touches body's styles, never
+     html's. Invisible in Fit/Fill (the frame scales up to nearly fill the
+     viewport anyway) but obvious in Actual Size, where the frame stays
+     small and visibly drifted to center no matter which of the 9
+     alignment points was actually picked. */
+  html {
+    height: 100%;
+  }
+  body {
     margin: 0;
     height: 100%;
+    width: 100%;
     display: flex;
     align-items: center;
     justify-content: center;

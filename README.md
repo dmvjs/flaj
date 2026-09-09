@@ -34,9 +34,11 @@ Full reference and execution model: [`docs/SCRIPTING.md`](docs/SCRIPTING.md). Ty
 
 F5 insert frame · F6 keyframe · F7 blank keyframe · Shift-F5 remove frames — same as Flash.
 
+⌘Z / ⇧⌘Z undo/redo · ⌘O open · ⌘S save · ⇧⌘S save as · ⌘Return preview in browser. Delete/⌘C/⌘V work on the current Stage selection.
+
 ## Export
 
-File → Export GIF… simulates the whole timeline frame by frame and writes it out, tweens and all.
+File → Export GIF… simulates the whole timeline frame by frame and writes it out, tweens and all. File → Export Web Page… writes a standalone HTML/JS/CSS bundle with the same playback engine.
 
 ## Format
 

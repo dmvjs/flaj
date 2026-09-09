@@ -37,18 +37,17 @@ struct FlajApp: App {
                             .frame(width: 40)
                         StageView(doc: doc)
                             .frame(minWidth: 320, minHeight: 260, idealHeight: 380)
-                        VSplitView {
-                            PropertiesPanelView(doc: doc)
-                                .frame(minHeight: 260, idealHeight: 420)
-                            DebugConsoleView(doc: doc)
-                                .frame(minHeight: 100, idealHeight: 120)
-                        }
-                        .frame(minWidth: 260)
+                        PropertiesPanelView(doc: doc)
+                            .frame(minWidth: 260, minHeight: 260, idealHeight: 420)
                     }
-                    TimelineView(doc: doc)
-                        .frame(minHeight: 220, idealHeight: 280)
-                    CodeEditorPanel(doc: doc)
-                        .frame(minHeight: 100, idealHeight: 140)
+                    VSplitView {
+                        TimelineView(doc: doc)
+                            .frame(minHeight: 220, idealHeight: 280)
+                        CodeEditorPanel(doc: doc)
+                            .frame(minHeight: 100, idealHeight: 140)
+                        DebugConsoleView(doc: doc)
+                            .frame(minHeight: 100, idealHeight: 120)
+                    }
                 }
             }
             .frame(minWidth: 900, idealWidth: 1600, minHeight: 860, idealHeight: 900)
@@ -77,6 +76,9 @@ struct FlajApp: App {
                 Divider()
                 Button("Export GIF…") { doc.exportGIF() }
                 Button("Export Web Page…") { doc.exportWebPage() }
+                Divider()
+                Button("Preview in Browser") { doc.previewInBrowser() }
+                    .keyboardShortcut(.return, modifiers: .command)
             }
             CommandMenu("Insert") {
                 Button("Frame") { doc.insertFrameAtSelection() }

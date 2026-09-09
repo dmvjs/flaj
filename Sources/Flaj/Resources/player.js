@@ -185,11 +185,13 @@
   }
 
   function boxKeyframe(placement, spinDeg) {
+    const scale = placement.scale ?? 1;
+    const rotation = (placement.rotation ?? 0) + spinDeg;
     return {
       left: placement.x + 'px', top: placement.y + 'px',
       width: placement.width + 'px', height: placement.height + 'px',
       fontSize: placement.fontSize + 'px',
-      transform: `rotate(${spinDeg}deg)`
+      transform: `scale(${scale}) rotate(${rotation}deg)`
     };
   }
 
@@ -349,6 +351,24 @@
         console.error(e && e.message ? e.message : String(e));
       }
     }
+    updateClickTag();
+  }
+
+  // The banner-ad clickTag convention: a script sets stage.clickTag to a
+  // URL (a plain assignable property, not a method — see the `stage`
+  // object below) and the *whole* Stage frame becomes one big link,
+  // opening it in a new window/tab. Applied to #flaj-frame, not just the
+  // background, so it wins over clicks on placed text/stage objects too —
+  // mirrors StageView's identical clickTag overlay in the native app.
+  // `stage` itself is a plain, persistent object, so once set this stays
+  // in effect across frames without needing to be re-set each time —
+  // checked after every script run regardless of whether *that* frame's
+  // script touched it.
+  function updateClickTag() {
+    const url = stage.clickTag;
+    const active = typeof url === 'string' && url.length > 0;
+    frameEl.style.cursor = active ? 'pointer' : '';
+    frameEl.onclick = active ? () => window.open(url, '_blank') : null;
   }
 
   function clamp(frame, lo, hi) { return Math.min(Math.max(frame, lo), hi); }

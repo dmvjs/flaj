@@ -8,7 +8,11 @@ extension TimelineDocument {
         stop()
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.gif]
-        panel.nameFieldStringValue = "Untitled.gif"
+        // "{actual pixel width}x{height}.gif" — e.g. "550x400.gif" — not a
+        // generic "Untitled", so the dimensions are legible from the
+        // filename alone (handy when juggling a few exports at different
+        // sizes side by side).
+        panel.nameFieldStringValue = "\(Int(stageWidth))x\(Int(stageHeight)).gif"
         panel.begin { [weak self] response in
             Task { @MainActor in
                 guard response == .OK, let url = panel.url, let self else { return }

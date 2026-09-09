@@ -86,6 +86,20 @@ a second tween call on the same object+property replaces the one already in
 flight rather than stacking. Easing is `'linear'` (default), `'easeIn'`,
 `'easeOut'`, or `'easeInOut'`.
 
+## Click-through (clickTag)
+
+The banner-ad "clickTAG" convention — a plain property, not a method:
+
+```js
+stage.clickTag = 'https://example.com';
+```
+
+Once set, the whole Stage becomes one big link: click anywhere on it (over
+placed text and stage objects too, not just empty background) and it opens
+that URL in a new window/tab, cursor and all. Usually set once in frame 1's
+script and left alone — it stays in effect for the rest of the movie, same
+behavior in the native app's own preview and the exported page.
+
 ## Console
 
 ```js

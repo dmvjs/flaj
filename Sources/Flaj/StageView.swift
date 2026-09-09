@@ -23,6 +23,22 @@ struct StageContentView: View {
                     StagePlacedTextView(doc: doc, layer: layer, keyframe: kf, scale: scale)
                 }
             }
+            // The banner-ad clickTag convention (see TimelineDocument.
+            // clickTagURL): while playing, if a script has set one, the
+            // *whole* Stage becomes one big link — this sits on top of
+            // everything else in the ZStack specifically so a click lands
+            // here even over placed text/stage objects, which otherwise
+            // have their own tap/drag gestures that would win instead.
+            // Only present during playback so it never shadows normal
+            // editing clicks (select/move/place-text) the rest of the time.
+            if doc.isPlaying, let clickTagURL = doc.clickTagURL {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture { openClickTag(clickTagURL) }
+                    .onHover { hovering in
+                        if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
+                    }
+            }
         }
         .frame(width: doc.stageWidth * scale, height: doc.stageHeight * scale)
     }
@@ -35,6 +51,11 @@ struct StageContentView: View {
         case .selection:
             doc.selectedPlacement = nil
         }
+    }
+
+    private func openClickTag(_ urlString: String) {
+        guard let url = URL(string: urlString) else { return }
+        NSWorkspace.shared.open(url)
     }
 }
 
@@ -56,7 +77,7 @@ private struct OnionSkinOverlay: View {
                 if frame >= 1 && frame <= doc.totalFrames {
                     ForEach(doc.visibleLayers.filter { !$0.hidden }) { layer in
                         if let placement = layer.interpolatedPlacedText(at: frame) {
-                            ghost(placement, tint: offset < 0 ? .blue : .orange)
+                            ghost(placement, tint: offset < 0 ? .blue : .orange, spin: spinDegrees(layer: layer, at: frame))
                         }
                     }
                 }
@@ -74,8 +95,11 @@ private struct OnionSkinOverlay: View {
 
     /// A flat tint rather than the placement's own color — the point is to
     /// see *where* content was/will be at a glance, not to preview an
-    /// in-progress color tween a second time.
-    private func ghost(_ p: PlacedText, tint: Color) -> some View {
+    /// in-progress color tween a second time. Scale/rotation are still the
+    /// real interpolated values though (`p.scale`/`p.rotation`, plus the
+    /// same "Rotate: CW/CCW, N times" spin bonus StagePlacedTextView
+    /// applies) — those aren't part of the "flatten the color" simplification.
+    private func ghost(_ p: PlacedText, tint: Color, spin: Double) -> some View {
         Text(p.text)
             .font(.custom(p.fontName, size: p.fontSize * scale))
             .bold(p.bold)
@@ -84,7 +108,20 @@ private struct OnionSkinOverlay: View {
             .multilineTextAlignment(p.alignment.swiftUIAlignment)
             .frame(width: p.width * scale, height: p.height * scale, alignment: p.alignment.frameAlignment)
             .opacity(0.35)
+            .scaleEffect(p.scale)
+            .rotationEffect(.degrees(p.rotation + spin))
             .position(x: (p.x + p.width / 2) * scale, y: (p.y + p.height / 2) * scale)
+    }
+
+    /// Same "Rotate: CW/CCW, N times" tween bonus StagePlacedTextView's own
+    /// `spinDegrees` computes, just re-derived for an arbitrary onion-skin
+    /// `frame` instead of the live playhead.
+    private func spinDegrees(layer: TLLayer, at frame: Int) -> Double {
+        guard let kf = layer.governingKeyframe(at: frame),
+              let endKf = layer.tweenTarget(from: kf), endKf > kf else { return 0 }
+        let settings = layer.tweenSettings[kf] ?? TweenSettings()
+        let rawT = Double(frame - kf) / Double(endKf - kf)
+        return settings.spinDegrees(at: rawT)
     }
 }
 
@@ -102,6 +139,15 @@ private struct StagePlacedTextView: View {
     // instead of compounding translation into itself every tick.
     @State private var moveStart: PlacedText?
     @State private var resizeStart: PlacedText?
+    // The live candidate placement during an active move/resize — kept
+    // purely local and committed to `layer.textFrames`/`doc.selectedPlacement`
+    // only in `onEnded`, not on every tick. Writing to those shared
+    // `@Observable` properties on every pixel dragged — this view's own
+    // body reads both, for `displayPlacement` and `isSelected` — used to
+    // make the selection box visibly flicker, and forced every *other*
+    // view reading the same placement (the Properties panel's fields, the
+    // Timeline) to re-render on every tick too, not just this one.
+    @State private var liveDrag: PlacedText?
 
     private var ref: TimelineDocument.TextPlacementRef {
         TimelineDocument.TextPlacementRef(layerID: layer.id, keyframe: keyframe)
@@ -118,7 +164,7 @@ private struct StagePlacedTextView: View {
     /// `layer.textFrames[keyframe]` directly, never this — you edit a
     /// tween's endpoints, not an in-between frame.
     private var displayPlacement: PlacedText {
-        layer.interpolatedPlacedText(at: doc.playhead) ?? placement
+        liveDrag ?? layer.interpolatedPlacedText(at: doc.playhead) ?? placement
     }
 
     private var spinDegrees: Double {
@@ -142,7 +188,8 @@ private struct StagePlacedTextView: View {
             .contentShape(Rectangle())
             .overlay(isSelected ? Rectangle().stroke(Color.accentColor, lineWidth: 1.5) : nil)
             .overlay(alignment: .bottomTrailing) { if isSelected { resizeHandle } }
-            .rotationEffect(.degrees(spinDegrees))
+            .scaleEffect(shown.scale)
+            .rotationEffect(.degrees(shown.rotation + spinDegrees))
             .position(x: (shown.x + shown.width / 2) * scale, y: (shown.y + shown.height / 2) * scale)
             .onTapGesture { doc.selectedPlacement = ref }
             .gesture(moveGesture)
@@ -154,18 +201,32 @@ private struct StagePlacedTextView: View {
     }
 
     private var moveGesture: some Gesture {
-        DragGesture(minimumDistance: 1)
+        // .global, not the default .local: this view's own frame moves as
+        // a *result* of the drag (`.position(...)` tracks `liveDrag` live),
+        // so a .local translation is measured against a coordinate space
+        // that's shifting under the gesture mid-drag — translation drifts
+        // out of sync with the actual cursor. Global screen coordinates
+        // don't move just because this view did.
+        DragGesture(minimumDistance: 1, coordinateSpace: .global)
             .onChanged { value in
                 guard doc.selectedTool == .selection else { return }
-                doc.selectedPlacement = ref
                 let start = moveStart ?? placement
                 if moveStart == nil { moveStart = start }
                 var p = start
                 p.x = start.x + value.translation.width / scale
                 p.y = start.y + value.translation.height / scale
-                doc.withUndoSnapshot(coalesce: ref.undoToken) { layer.textFrames[keyframe] = p }
+                liveDrag = p
             }
-            .onEnded { _ in moveStart = nil }
+            .onEnded { _ in
+                if let liveDrag {
+                    doc.withUndoSnapshot(coalesce: ref.undoToken) {
+                        doc.selectedPlacement = ref
+                        layer.textFrames[keyframe] = liveDrag
+                    }
+                }
+                moveStart = nil
+                liveDrag = nil
+            }
     }
 
     private var resizeHandle: some View {
@@ -173,16 +234,25 @@ private struct StagePlacedTextView: View {
             .fill(Color.accentColor)
             .frame(width: 8, height: 8)
             .gesture(
-                DragGesture(minimumDistance: 1)
+                // .global for the same reason as moveGesture — the handle
+                // sits at .bottomTrailing of the very frame that's resizing
+                // live, so its .local origin moves under the gesture too.
+                DragGesture(minimumDistance: 1, coordinateSpace: .global)
                     .onChanged { value in
                         let start = resizeStart ?? placement
                         if resizeStart == nil { resizeStart = start }
                         var p = start
                         p.width = max(20, start.width + value.translation.width / scale)
                         p.height = max(16, start.height + value.translation.height / scale)
-                        doc.withUndoSnapshot(coalesce: ref.undoToken) { layer.textFrames[keyframe] = p }
+                        liveDrag = p
                     }
-                    .onEnded { _ in resizeStart = nil }
+                    .onEnded { _ in
+                        if let liveDrag {
+                            doc.withUndoSnapshot(coalesce: ref.undoToken) { layer.textFrames[keyframe] = liveDrag }
+                        }
+                        resizeStart = nil
+                        liveDrag = nil
+                    }
             )
     }
 }
@@ -257,13 +327,45 @@ struct StageView: View {
     }
 
     /// Arrow keys move the selected placed-text box 1pt per press, 10pt
-    /// with Shift held — Flash's classic nudge amounts. Returns whether the
-    /// event was consumed; when nothing's selected (or it's not an arrow
-    /// key) it isn't, so the key event propagates normally. The actual
-    /// move is TimelineDocument.nudgeSelectedPlacement, which has its own
-    /// direct unit test.
+    /// with Shift held — Flash's classic nudge amounts — plus Delete
+    /// (removes the selected placement) and Cmd+C/Cmd+V (copy/paste it,
+    /// pasting into whatever's currently selected on the Timeline, not
+    /// necessarily back onto the same frame — so copy, click a different
+    /// frame, paste lands it there). Returns whether the event was
+    /// consumed; when nothing applies it isn't, so the key event
+    /// propagates normally. The actual moves/copy/paste/delete are
+    /// TimelineDocument methods, each with their own direct unit test.
     private func nudgeSelection(_ event: NSEvent) -> Bool {
+        // Don't steal keys from an actively-focused text field/editor
+        // elsewhere in the app (the Actions panel's script editor, a
+        // Properties panel field, etc.) — this monitor fires for every
+        // keyDown app-wide, and Delete/Cmd+C/Cmd+V need to mean "edit the
+        // Stage selection" only when nothing else has focus that would
+        // more naturally claim them.
+        if let responder = NSApp.keyWindow?.firstResponder, responder is NSTextView { return false }
+
+        if event.modifierFlags.contains(.command) {
+            switch event.charactersIgnoringModifiers?.lowercased() {
+            case "c":
+                guard doc.selectedPlacement != nil else { return false }
+                doc.copySelectedPlacement()
+                return true
+            case "v":
+                guard doc.hasCopiedText, let layer = doc.selectedLayer else { return false }
+                doc.pastePlacedText(layer: layer, at: doc.selectedFrame)
+                return true
+            default:
+                return false
+            }
+        }
+
         guard doc.selectedPlacement != nil else { return false }
+
+        if event.keyCode == 51 || event.keyCode == 117 { // Delete (backspace) / Forward Delete
+            doc.deleteSelectedPlacement()
+            return true
+        }
+
         let step: CGFloat = event.modifierFlags.contains(.shift) ? 10 : 1
         switch Int(event.keyCode) {
         case 126: doc.nudgeSelectedPlacement(dx: 0, dy: -step) // up

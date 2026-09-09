@@ -8,9 +8,6 @@ let layerIconColWidth: CGFloat = 18
 
 struct TimelineView: View {
     @Bindable var doc: TimelineDocument
-    @State private var showingSizePopover = false
-    @State private var widthText = ""
-    @State private var heightText = ""
 
     var body: some View {
         GeometryReader { geo in
@@ -31,6 +28,15 @@ struct TimelineView: View {
                             }
                         }
                         .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+                        // This ScrollView has no explicit height of its own
+                        // (it's sized by its content, inside the outer
+                        // vertical ScrollView), which leaves its horizontal
+                        // scroll indicator with no well-defined place to
+                        // sit — it was rendering as a bar tall enough to
+                        // dominate a single 20pt frame row. Trackpad/mouse-
+                        // wheel horizontal scrolling still works with the
+                        // indicator hidden; nothing else did.
+                        .scrollIndicators(.hidden, axes: .horizontal)
                     }
                 }
                 .scrollBounceBehavior(.basedOnSize, axes: .vertical)
@@ -139,35 +145,6 @@ struct TimelineView: View {
 
                 Divider().frame(height: 16)
 
-                HStack(spacing: 6) {
-                    Text("Size:").font(.system(size: 11)).foregroundStyle(.secondary)
-                    Button("\(Int(doc.stageWidth)) x \(Int(doc.stageHeight)) px") {
-                        widthText = "\(Int(doc.stageWidth))"
-                        heightText = "\(Int(doc.stageHeight))"
-                        showingSizePopover = true
-                    }
-                    .buttonStyle(.link)
-                    .font(.system(size: 11))
-                    .popover(isPresented: $showingSizePopover) { sizePopoverContent }
-                }
-
-                HStack(spacing: 8) {
-                    Text("Background:").font(.system(size: 11)).foregroundStyle(.secondary)
-                    ColorPicker("", selection: doc.undoableBinding(\.stageColor, coalesce: "stageColor")).labelsHidden()
-                }
-
-                HStack(spacing: 6) {
-                    Text("Frame rate:").font(.system(size: 11)).foregroundStyle(.secondary)
-                    HStack(spacing: 4) {
-                        TextField("", value: doc.undoableBinding(\.fps, coalesce: "fps"), formatter: Self.fpsFormatter)
-                            .frame(width: 34)
-                            .textFieldStyle(.roundedBorder)
-                        Text("fps").font(.system(size: 10)).foregroundStyle(.secondary)
-                    }
-                }
-
-                Divider().frame(height: 16)
-
                 HStack(spacing: 4) {
                     Button(action: { doc.onionSkinEnabled.toggle() }) {
                         Image(systemName: "square.stack")
@@ -175,11 +152,26 @@ struct TimelineView: View {
                     }
                     .help("Onion Skin — ghost nearby frames' content on the Stage")
                     if doc.onionSkinEnabled {
-                        Stepper(value: $doc.onionSkinRange, in: 1...5) {
-                            Text("±\(doc.onionSkinRange)").font(.system(size: 10)).foregroundStyle(.secondary)
+                        // A plain Stepper is a full-size native control —
+                        // visibly bulky next to this bar's tiny icon
+                        // buttons regardless of controlSize. Two small
+                        // plain buttons match the bar's own scale instead.
+                        HStack(spacing: 3) {
+                            Button(action: { doc.onionSkinRange = max(1, doc.onionSkinRange - 1) }) {
+                                Image(systemName: "minus").font(.system(size: 8))
+                            }
+                            .disabled(doc.onionSkinRange <= 1)
+                            Text("±\(doc.onionSkinRange)")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 14)
+                            Button(action: { doc.onionSkinRange = min(5, doc.onionSkinRange + 1) }) {
+                                Image(systemName: "plus").font(.system(size: 8))
+                            }
+                            .disabled(doc.onionSkinRange >= 5)
                         }
+                        .buttonStyle(.plain)
                         .help("Frames before/after the playhead to ghost")
-                        .fixedSize()
                     }
                 }
 
@@ -192,43 +184,6 @@ struct TimelineView: View {
         .frame(height: 32)
     }
 
-    private var sizePopoverContent: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Document Properties").font(.system(size: 12, weight: .semibold))
-            HStack(spacing: 6) {
-                Text("Width:").font(.system(size: 11)).fixedSize().frame(width: 44, alignment: .leading)
-                TextField("", text: $widthText).frame(width: 60).textFieldStyle(.roundedBorder)
-                Text("px").font(.system(size: 11)).foregroundStyle(.secondary).fixedSize()
-            }
-            HStack(spacing: 6) {
-                Text("Height:").font(.system(size: 11)).fixedSize().frame(width: 44, alignment: .leading)
-                TextField("", text: $heightText).frame(width: 60).textFieldStyle(.roundedBorder)
-                Text("px").font(.system(size: 11)).foregroundStyle(.secondary).fixedSize()
-            }
-            HStack {
-                Spacer()
-                Button("Cancel") { showingSizePopover = false }
-                Button("OK") {
-                    if let w = Double(widthText), let h = Double(heightText), w > 0, h > 0 {
-                        doc.withUndoSnapshot {
-                            doc.stageWidth = w
-                            doc.stageHeight = h
-                        }
-                    }
-                    showingSizePopover = false
-                }
-                .keyboardShortcut(.defaultAction)
-            }
-        }
-        .padding(14)
-        .frame(width: 230)
-    }
-
-    private static let fpsFormatter: NumberFormatter = {
-        let f = NumberFormatter()
-        f.maximumFractionDigits = 1
-        return f
-    }()
 }
 
 // MARK: - Layer panel row
@@ -237,6 +192,9 @@ struct LayerRowView: View {
     let doc: TimelineDocument
     let layer: TLLayer
     @State private var isDropTarget = false
+    @State private var isEditingName = false
+    @State private var editedName = ""
+    @FocusState private var nameFieldFocused: Bool
 
     var isSelected: Bool { doc.selectedLayerID == layer.id }
 
@@ -255,10 +213,33 @@ struct LayerRowView: View {
                 .foregroundStyle(layer.swatch)
                 .frame(width: 14)
 
-            Text(layer.name)
-                .font(.system(size: 11))
-                .lineLimit(1)
-                .truncationMode(.tail)
+            if isEditingName {
+                TextField("", text: $editedName)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11))
+                    .focused($nameFieldFocused)
+                    .onAppear { nameFieldFocused = true }
+                    .onSubmit { commitRename() }
+                    .onExitCommand { isEditingName = false } // Escape cancels, doesn't commit
+                    .onChange(of: nameFieldFocused) { _, focused in
+                        // Clicking away also commits (Finder-style rename)
+                        // — guarded on isEditingName so this doesn't
+                        // re-fire commitRename() a second time after
+                        // onSubmit/onExitCommand already resolved it (both
+                        // set isEditingName = false first, which removes
+                        // this TextField and drops focus as a side effect).
+                        if !focused && isEditingName { commitRename() }
+                    }
+            } else {
+                Text(layer.name)
+                    .font(.system(size: 11))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .onTapGesture(count: 2) {
+                        editedName = layer.name
+                        isEditingName = true
+                    }
+            }
 
             Spacer(minLength: 4)
 
@@ -313,6 +294,17 @@ struct LayerRowView: View {
         }
     }
 
+    /// A blank/whitespace-only name is rejected (falls back to the layer's
+    /// existing name) rather than left empty — an unlabeled layer row
+    /// isn't a state this app should be able to get into via renaming.
+    private func commitRename() {
+        let trimmed = editedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty && trimmed != layer.name {
+            doc.withUndoSnapshot { layer.name = trimmed }
+        }
+        isEditingName = false
+    }
+
     private var iconName: String {
         switch layer.kind {
         case .normal: return "square.on.square"
@@ -350,12 +342,17 @@ struct RulerView: View {
                     .frame(width: frameWidth, height: rowHeight)
                 }
             }
-            .contentShape(Rectangle())
-            .gesture(dragGesture)
 
             playheadFlag
         }
         .frame(height: rowHeight)
+        // On the outer ZStack, not just the tick-mark HStack: the red
+        // playhead flag is drawn as a sibling on top of it with no gesture
+        // of its own, and being an opaque shape it was blocking clicks
+        // from reaching the gesture underneath instead of forwarding them
+        // — you could drag anywhere on the ruler except the flag itself.
+        .contentShape(Rectangle())
+        .gesture(dragGesture)
     }
 
     private var playheadFlag: some View {
@@ -383,6 +380,14 @@ struct FrameRowView: View {
     let layer: TLLayer
     let frameCount: Int
 
+    // Which frame a tween-end drag in progress on this row would land on —
+    // scoped to the row (not TimelineDocument) deliberately: a dragged
+    // cell's own body reads this to highlight the target, and mutating an
+    // `@Observable` property from inside a gesture that same body defines
+    // can redefine the gesture mid-drag and drop its tracking. Plain
+    // `@State` read through a `Binding` doesn't have that problem.
+    @State private var tweenDragTargetFrame: Int?
+
     var body: some View {
         // Frame -> its tween's start frame, for every frame that's a
         // tween's end keyframe — lets each cell know whether (and how far
@@ -393,7 +398,7 @@ struct FrameRowView: View {
             HStack(spacing: 0) {
                 ForEach(0..<frameCount, id: \.self) { i in
                     FrameCellSlot(doc: doc, layer: layer, frame: i + 1, columnIndex: i,
-                                  tweenEndStart: tweenEndStarts[i + 1])
+                                  tweenEndStart: tweenEndStarts[i + 1], dropTargetFrame: $tweenDragTargetFrame)
                 }
             }
             tweenArrows
@@ -484,8 +489,8 @@ struct FrameRowView: View {
 }
 
 /// One frame cell plus its gestures — its own view (rather than inline in
-/// FrameRowView's ForEach) so it can own `dragTranslationFrames` as local
-/// state for sliding a tween's end keyframe.
+/// FrameRowView's ForEach) so it can own its drag-local state for sliding a
+/// tween's end keyframe or repositioning a plain one.
 private struct FrameCellSlot: View {
     let doc: TimelineDocument
     let layer: TLLayer
@@ -495,23 +500,35 @@ private struct FrameCellSlot: View {
     /// tween's end keyframe — the one thing that's draggable, and only to
     /// frames after that start.
     let tweenEndStart: Int?
+    /// Owned by the parent FrameRowView, shared by every cell in this row —
+    /// which frame a tween-end drag in progress would land on, so the
+    /// destination cell (a different FrameCellSlot instance than the one
+    /// being dragged) can highlight itself. Plain `@State`+`Binding`,
+    /// deliberately not `doc`: this cell's own body reads it too (to know
+    /// whether *it's* the target), and mutating an `@Observable` property
+    /// from inside a gesture that same body defines can redefine the
+    /// gesture mid-drag and drop its tracking entirely.
+    @Binding var dropTargetFrame: Int?
 
-    // Local-only during the drag — the model isn't touched until onEnded,
-    // so the gesture stays attached to a stable, unchanging view the whole
-    // time (mutating layer.frames mid-drag would swap this cell's own mark
-    // out from under the very gesture recognizer tracking the drag).
-    @State private var dragTranslationFrames: Int = 0
+    // True for the whole gesture, not just non-zero translation — this cell
+    // still counts as "the one being dragged" even at the instant the mouse
+    // is back at its start position, so the highlight doesn't flicker off.
+    @State private var isDraggingKeyframe = false
+
+    private var isDropTarget: Bool { dropTargetFrame == frame }
 
     var body: some View {
         FrameCellView(
             mark: columnIndex < layer.frames.count ? layer.frames[columnIndex] : .empty,
             columnIndex: columnIndex,
             dimmed: layer.hidden,
-            isSelected: doc.selectedLayerID == layer.id && doc.selectedFrameRange.contains(frame)
+            isSelected: doc.selectedLayerID == layer.id && doc.selectedFrameRange.contains(frame),
+            isDropTarget: isDropTarget
         )
         .frame(width: frameWidth, height: rowHeight)
         .contentShape(Rectangle())
-        .opacity(dragTranslationFrames != 0 ? 0.4 : 1.0)
+        .opacity(isDraggingKeyframe ? 0.5 : 1.0)
+        .overlay(isDraggingKeyframe ? Rectangle().stroke(Color.accentColor, lineWidth: 1.5) : nil)
         .onTapGesture(count: 2) {
             doc.selectFrame(layer: layer, frame: frame, extend: false)
             doc.insertKeyframe(layer: layer, at: frame, blank: false)
@@ -525,7 +542,7 @@ private struct FrameCellSlot: View {
                 doc.selectFrame(layer: layer, frame: frame, extend: NSEvent.modifierFlags.contains(.shift))
             }
         )
-        .simultaneousGesture(tweenEndDrag)
+        .simultaneousGesture(keyframeDrag)
         .contextMenu {
             Button("Insert Frame") { doc.insertFrame(layer: layer, at: frame) }
             Button("Insert Keyframe") { doc.insertKeyframe(layer: layer, at: frame, blank: false) }
@@ -553,27 +570,52 @@ private struct FrameCellSlot: View {
         }
     }
 
-    /// No-ops entirely on any cell that isn't a tween's end keyframe.
-    private var tweenEndDrag: some Gesture {
+    /// Two draggable cases share this one gesture: sliding a tween's end
+    /// keyframe (`tweenEndStart != nil`, via `moveTweenEnd`) or repositioning
+    /// a plain, non-tween keyframe (via `moveKeyframe`). No-ops on anything
+    /// else — a tween's *start* keyframe isn't draggable at all (moving it
+    /// would leave the span it anchors dangling), nor is a `.plain`/`.tween`/
+    /// `.empty` continuation frame. Deliberately touches nothing on `doc`
+    /// until `onEnded` — see `dropTargetFrame`'s doc comment above for why
+    /// mutating the shared, `@Observable` document mid-drag is exactly what
+    /// used to break this gesture's own tracking. Selecting the frame
+    /// happens on release for the same reason; it still covers a plain
+    /// click (translation 0 still fires `onEnded`).
+    private var keyframeDrag: some Gesture {
         DragGesture(minimumDistance: 2)
             .onChanged { value in
-                guard tweenEndStart != nil else { return }
-                dragTranslationFrames = Int((value.translation.width / frameWidth).rounded())
+                guard let candidate = dragCandidate(for: value.translation.width) else { return }
+                isDraggingKeyframe = true
+                dropTargetFrame = candidate
             }
             .onEnded { value in
-                guard let tweenEndStart else { return }
-                let deltaFrames = Int((value.translation.width / frameWidth).rounded())
-                // +2, not +1: a tween needs at least one interior .tween
-                // frame to still register as a tween at all (that's the
-                // model's only signal linking the two keyframes) — landing
-                // right next to the start would silently turn it into two
-                // disconnected keyframes instead of the shortest valid tween.
-                let candidate = max(tweenEndStart + 2, frame + deltaFrames)
-                dragTranslationFrames = 0
-                if candidate != frame {
+                isDraggingKeyframe = false
+                let candidate = dragCandidate(for: value.translation.width)
+                dropTargetFrame = nil
+                guard let candidate else { return }
+                doc.selectFrame(layer: layer, frame: frame, extend: false)
+                guard candidate != frame else { return }
+                if tweenEndStart != nil {
                     doc.moveTweenEnd(layer: layer, from: frame, to: candidate)
+                } else {
+                    doc.moveKeyframe(layer: layer, from: frame, to: candidate)
                 }
             }
+    }
+
+    /// The frame this drag would land on right now, or nil if this cell
+    /// isn't a draggable one at all (see `keyframeDrag`'s doc comment).
+    private func dragCandidate(for translationWidth: CGFloat) -> Int? {
+        let deltaFrames = Int((translationWidth / frameWidth).rounded())
+        if let tweenEndStart {
+            // +2, not +1: a tween needs at least one interior .tween frame
+            // to still register as a tween at all (the model's only signal
+            // linking the two keyframes) — landing right next to the start
+            // would silently turn it into two disconnected keyframes.
+            return max(tweenEndStart + 2, frame + deltaFrames)
+        }
+        guard layer.isKeyframe(at: frame), layer.tweenTarget(from: frame) == nil else { return nil }
+        return max(1, frame + deltaFrames)
     }
 }
 
@@ -582,6 +624,11 @@ struct FrameCellView: View {
     let columnIndex: Int
     let dimmed: Bool
     var isSelected: Bool = false
+    /// True on the one cell a tween-end drag currently in progress would
+    /// land on if released now (see FrameCellSlot.tweenEndDrag) — drawn
+    /// distinctly from plain selection so "here's where it's going" reads
+    /// at a glance while dragging.
+    var isDropTarget: Bool = false
 
     private var bandColor: Color {
         switch mark {
@@ -593,8 +640,10 @@ struct FrameCellView: View {
 
     var body: some View {
         ZStack {
-            Rectangle().fill(isSelected ? Color.accentColor.opacity(0.3) : bandColor)
-            if isSelected {
+            Rectangle().fill(isDropTarget ? Color.accentColor.opacity(0.45) : (isSelected ? Color.accentColor.opacity(0.3) : bandColor))
+            if isDropTarget {
+                Rectangle().stroke(Color.accentColor, style: StrokeStyle(lineWidth: 1.5, dash: [3, 2]))
+            } else if isSelected {
                 Rectangle().stroke(Color.accentColor, lineWidth: 1)
             }
             // Skip the per-cell divider across a tween span — with every

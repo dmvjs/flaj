@@ -56,6 +56,59 @@ final class WebExportTests: XCTestCase {
         XCTAssertEqual(end as? String, "40px")
     }
 
+    /// Scale/rotation tween in the exported page — `getComputedStyle`'s
+    /// `transform` comes back as a matrix, not a literal "scale(...)
+    /// rotate(...)" string, so this decomposes it back into scale/degrees
+    /// via DOMMatrixReadOnly rather than string-comparing (which would also
+    /// be brittle against float noise like cos(90°) != exactly 0).
+    func testScaleAndRotationTweenInTheExportedPage() async throws {
+        let totalFrames = 10
+        var frames = [FrameMark](repeating: .tween, count: totalFrames)
+        frames[0] = .keyframe(hasScript: false)
+        frames[totalFrames - 1] = .keyframe(hasScript: false)
+        let layer = TLLayer(name: "text", swatch: .green, frames: frames)
+        layer.textFrames[1] = PlacedText(text: "Flaj", x: 0, y: 0, width: 40, height: 20, scale: 1, rotation: 0)
+        layer.textFrames[totalFrames] = PlacedText(text: "Flaj", x: 0, y: 0, width: 40, height: 20, scale: 2, rotation: 90)
+        layer.tweenSettings[1] = TweenSettings(family: .linear)
+        let doc = TimelineDocument(layers: [layer], totalFrames: totalFrames)
+        doc.stageWidth = 100
+        doc.stageHeight = 60
+        doc.fps = 10
+
+        let url = exportedURL(doc)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let harness = WebViewHarness()
+        try await harness.load(fileURL: url)
+
+        func scaleAndRotation() async throws -> (scale: Double, rotationDeg: Double) {
+            let scale = try await harness.evaluate("""
+            (() => { const m = new DOMMatrixReadOnly(getComputedStyle(document.querySelector('.flaj-text')).transform); return Math.hypot(m.a, m.b); })()
+            """)
+            let rotation = try await harness.evaluate("""
+            (() => { const m = new DOMMatrixReadOnly(getComputedStyle(document.querySelector('.flaj-text')).transform); return Math.atan2(m.b, m.a) * 180 / Math.PI; })()
+            """)
+            return ((scale as? NSNumber)?.doubleValue ?? -1, (rotation as? NSNumber)?.doubleValue ?? -999)
+        }
+
+        try await harness.evaluate("gotoAndStop(1)")
+        let start = try await scaleAndRotation()
+        XCTAssertEqual(start.scale, 1, accuracy: 0.01)
+        XCTAssertEqual(start.rotationDeg, 0, accuracy: 0.5)
+
+        try await harness.evaluate("gotoAndStop(\(totalFrames))")
+        let end = try await scaleAndRotation()
+        XCTAssertEqual(end.scale, 2, accuracy: 0.01)
+        XCTAssertEqual(end.rotationDeg, 90, accuracy: 0.5)
+
+        // Midpoint (linear easing, frame 5.5 worth of progress isn't a real
+        // frame, so land on the nearest integer frame and accept a wider
+        // tolerance for the linear-interpolation slack that introduces).
+        try await harness.evaluate("gotoAndStop(5)")
+        let mid = try await scaleAndRotation()
+        XCTAssertEqual(mid.scale, 1.44, accuracy: 0.05) // 1 + (2-1) * (4/9)
+        XCTAssertEqual(mid.rotationDeg, 40, accuracy: 3)
+    }
+
     func testTitleOptionSetsPageTitle() async throws {
         let doc = DocumentFixtures.blackWhiteFlip()
         doc.webExportTitle = "My Great Movie"
@@ -275,6 +328,31 @@ final class WebExportTests: XCTestCase {
         XCTAssertEqual(rect?["bottom"]?.doubleValue ?? -1, 300, accuracy: 0.5)
     }
 
+    /// Regression: `html` and `body` both had `justify-content: center` in
+    /// the export template, but player.js's applyAlignment() only ever
+    /// overrides it on `body` — so once `body` shrinks to fit its content
+    /// (which is exactly what happens under `.none`/Actual Size, unlike
+    /// `.contain`/`.cover` where the frame scales up to nearly fill the
+    /// viewport and masks the bug), `html`'s own untouched centering took
+    /// over and the frame drifted to the middle regardless of which of the
+    /// 9 alignment points was actually selected.
+    func testActualSizeRespectsCornerAlignmentInsteadOfCenteringRegardlessOfIt() async throws {
+        let doc = DocumentFixtures.blackWhiteFlip() // 8x8 Stage
+        doc.webExportFit = .none
+        doc.webExportAlignment = .topLeading
+        let url = exportedURL(doc)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let harness = WebViewHarness() // 400x300 WKWebView
+        try await harness.load(fileURL: url)
+
+        let rect = try await harness.evaluate(
+            "document.getElementById('flaj-frame').getBoundingClientRect().toJSON()"
+        ) as? [String: NSNumber]
+        XCTAssertEqual(rect?["left"]?.doubleValue ?? -1, 0, accuracy: 0.5)
+        XCTAssertEqual(rect?["top"]?.doubleValue ?? -1, 0, accuracy: 0.5)
+    }
+
     func testOversizedTextIsNotClippedByItsOwnBox() async throws {
         // The native app's Stage view never clips a text box's own content
         // either (SwiftUI's .frame() only sets the box for positioning) —
@@ -424,5 +502,59 @@ final class WebExportTests: XCTestCase {
 
         let color = try await harness.evaluate("getComputedStyle(document.getElementById('flaj-stage')).backgroundColor")
         XCTAssertEqual(color as? String, "rgb(255, 255, 255)", "should have opened straight on frame 2, not frame 1")
+    }
+
+    /// The banner-ad clickTag convention (see TimelineDocument.
+    /// clickTagURL and player.js's updateClickTag) — a script sets
+    /// `stage.clickTag` to a URL and the whole #flaj-frame becomes a
+    /// pointer-cursor link that opens it in a new window on click.
+    /// `window.open` is stubbed rather than actually invoked — there's no
+    /// real "did a new window open" signal to read back from inside a
+    /// WKWebView, but capturing the call and its arguments is just as
+    /// strong a guarantee that the click handler does the right thing.
+    func testClickTagMakesTheWholeStageAPointerCursorLinkThatOpensInANewWindow() async throws {
+        let layer = TLLayer(name: "actions", swatch: .yellow, frames: [.keyframe(hasScript: true)])
+        layer.frameScripts[1] = "stage.clickTag = 'https://example.com/ad';"
+        let doc = TimelineDocument(layers: [layer], totalFrames: 1)
+        doc.stageWidth = 8
+        doc.stageHeight = 8
+
+        let url = exportedURL(doc)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let harness = WebViewHarness()
+        try await harness.load(fileURL: url)
+
+        let cursor = try await harness.evaluate("getComputedStyle(document.getElementById('flaj-frame')).cursor")
+        XCTAssertEqual(cursor as? String, "pointer")
+
+        let openCall = try await harness.evaluate("""
+        (() => {
+          window.__openedArgs = null;
+          window.open = (url, target) => { window.__openedArgs = [url, target]; };
+          document.getElementById('flaj-frame').click();
+          return window.__openedArgs;
+        })()
+        """)
+        let args = try XCTUnwrap(openCall as? [Any])
+        XCTAssertEqual(args[0] as? String, "https://example.com/ad")
+        XCTAssertEqual(args[1] as? String, "_blank")
+    }
+
+    /// Without a clickTag set, the Stage should behave exactly as before —
+    /// no pointer cursor, no click handler installed at all.
+    func testNoClickTagLeavesTheStageWithoutAClickHandlerOrPointerCursor() async throws {
+        let doc = DocumentFixtures.blackWhiteFlip()
+        let url = exportedURL(doc)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let harness = WebViewHarness()
+        try await harness.load(fileURL: url)
+
+        let cursor = try await harness.evaluate("getComputedStyle(document.getElementById('flaj-frame')).cursor")
+        XCTAssertNotEqual(cursor as? String, "pointer")
+
+        let onclickIsSet = try await harness.evaluate("document.getElementById('flaj-frame').onclick !== null")
+        XCTAssertEqual(onclickIsSet as? Bool, false)
     }
 }

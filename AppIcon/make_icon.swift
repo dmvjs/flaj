@@ -1,91 +1,55 @@
 import AppKit
 
+// Homage to the Adobe Flash Professional (CS6-era) app icon — thick
+// colored border, dark near-black interior, bold "Fl" wordmark — recolored
+// to Flaj's own pink (the same one FlajDoc.icns uses for .flaj files, see
+// make_doc_icon.swift) instead of Flash's original red-orange.
 func makeIcon() -> NSImage {
     let size: CGFloat = 1024
     let img = NSImage(size: NSSize(width: size, height: size))
     img.lockFocus()
     guard let ctx = NSGraphicsContext.current?.cgContext else { fatalError() }
 
-    let rect = CGRect(x: 0, y: 0, width: size, height: size)
+    let flajPink = NSColor(calibratedRed: 1.0, green: 0.35, blue: 0.6, alpha: 1) // matches FlajDoc.icns
+
+    let outerRect = CGRect(x: 0, y: 0, width: size, height: size)
     let cornerRadius = size * 0.225
-    let clipPath = CGPath(roundedRect: rect, cornerWidth: cornerRadius, cornerHeight: cornerRadius, transform: nil)
+    let outerPath = CGPath(roundedRect: outerRect, cornerWidth: cornerRadius, cornerHeight: cornerRadius, transform: nil)
 
     ctx.saveGState()
-    ctx.addPath(clipPath)
-    ctx.clip()
+    ctx.setShadow(offset: CGSize(width: 0, height: -size * 0.015), blur: size * 0.035,
+                   color: NSColor.black.withAlphaComponent(0.35).cgColor)
+    ctx.setFillColor(flajPink.cgColor)
+    ctx.addPath(outerPath)
+    ctx.fillPath()
+    ctx.restoreGState()
 
-    // Background: warm amber/gold gradient — instantly reads "JS".
-    let bgColors = [
-        NSColor(calibratedRed: 1.00, green: 0.84, blue: 0.04, alpha: 1).cgColor, // #FFD60A
-        NSColor(calibratedRed: 1.00, green: 0.62, blue: 0.04, alpha: 1).cgColor  // #FF9F0A
-    ] as CFArray
-    let bgGradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: bgColors, locations: [0, 1])!
-    ctx.drawLinearGradient(bgGradient, start: CGPoint(x: 0, y: size), end: CGPoint(x: size, y: 0), options: [])
+    // Dark near-black interior, inset from the pink border — Flash's own
+    // badge reads as a thick colored frame around a near-black center.
+    let borderWidth = size * 0.09
+    let innerRect = outerRect.insetBy(dx: borderWidth, dy: borderWidth)
+    let innerRadius = max(0, cornerRadius - borderWidth * 0.6)
+    let innerPath = CGPath(roundedRect: innerRect, cornerWidth: innerRadius, cornerHeight: innerRadius, transform: nil)
+    ctx.setFillColor(NSColor(calibratedRed: 0.10, green: 0.02, blue: 0.07, alpha: 1).cgColor)
+    ctx.addPath(innerPath)
+    ctx.fillPath()
 
-    // Liquid-glass sheen: soft white glow, upper-left.
-    let glowColors = [
-        NSColor.white.withAlphaComponent(0.40).cgColor,
-        NSColor.white.withAlphaComponent(0.0).cgColor
-    ] as CFArray
-    let glow = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: glowColors, locations: [0, 1])!
-    ctx.drawRadialGradient(
-        glow,
-        startCenter: CGPoint(x: size * 0.28, y: size * 0.78), startRadius: 0,
-        endCenter: CGPoint(x: size * 0.28, y: size * 0.78), endRadius: size * 0.62,
-        options: []
-    )
-
-    // "JS" glyph, bold, dark navy, shifted slightly up-left to leave room
-    // for the play badge.
-    let text = "JS"
-    let font = NSFont.systemFont(ofSize: size * 0.46, weight: .heavy)
-    let textColor = NSColor(calibratedRed: 0.09, green: 0.11, blue: 0.20, alpha: 1) // near-black navy
+    // "Fl" wordmark, bold, in the same pink as the border.
+    let text = "Fl"
+    let font = NSFont.systemFont(ofSize: size * 0.52, weight: .heavy)
     let paragraph = NSMutableParagraphStyle()
     paragraph.alignment = .center
     let attrs: [NSAttributedString.Key: Any] = [
         .font: font,
-        .foregroundColor: textColor,
+        .foregroundColor: flajPink,
         .paragraphStyle: paragraph,
         .kern: -size * 0.01
     ]
     let attrString = NSAttributedString(string: text, attributes: attrs)
     let textSize = attrString.size()
-    let textOrigin = CGPoint(x: size * 0.5 - textSize.width / 2 - size * 0.03,
-                              y: size * 0.5 - textSize.height / 2 + size * 0.02)
+    let textOrigin = CGPoint(x: size * 0.5 - textSize.width / 2,
+                              y: size * 0.5 - textSize.height / 2 + size * 0.01)
     attrString.draw(at: textOrigin)
-
-    ctx.restoreGState()
-
-    // Play badge: dark navy circle, bottom-right, with an amber play
-    // triangle inside — the "animation" half of the story.
-    let badgeRadius = size * 0.205
-    let badgeCenter = CGPoint(x: size * 0.775, y: size * 0.225)
-
-    ctx.saveGState()
-    ctx.setShadow(offset: CGSize(width: 0, height: -size * 0.01), blur: size * 0.02,
-                   color: NSColor.black.withAlphaComponent(0.35).cgColor)
-    ctx.setFillColor(NSColor(calibratedRed: 0.09, green: 0.11, blue: 0.20, alpha: 1).cgColor)
-    ctx.addEllipse(in: CGRect(x: badgeCenter.x - badgeRadius, y: badgeCenter.y - badgeRadius,
-                               width: badgeRadius * 2, height: badgeRadius * 2))
-    ctx.fillPath()
-    ctx.restoreGState()
-
-    // White ring around the badge for separation against the gold background.
-    ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.9).cgColor)
-    ctx.setLineWidth(size * 0.012)
-    ctx.addEllipse(in: CGRect(x: badgeCenter.x - badgeRadius, y: badgeCenter.y - badgeRadius,
-                               width: badgeRadius * 2, height: badgeRadius * 2))
-    ctx.strokePath()
-
-    let triSize = badgeRadius * 0.85
-    let tri = CGMutablePath()
-    tri.move(to: CGPoint(x: badgeCenter.x - triSize * 0.32, y: badgeCenter.y + triSize * 0.5))
-    tri.addLine(to: CGPoint(x: badgeCenter.x - triSize * 0.32, y: badgeCenter.y - triSize * 0.5))
-    tri.addLine(to: CGPoint(x: badgeCenter.x + triSize * 0.58, y: badgeCenter.y))
-    tri.closeSubpath()
-    ctx.setFillColor(NSColor(calibratedRed: 1.00, green: 0.84, blue: 0.04, alpha: 1).cgColor)
-    ctx.addPath(tri)
-    ctx.fillPath()
 
     img.unlockFocus()
     return img

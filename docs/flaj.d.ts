@@ -80,6 +80,17 @@ declare const stage: {
      * it was already in flight.
      */
     tween(id: string, transform: StageObjectTransform, frames: number, easing?: Easing): void;
+
+    /**
+     * The banner-ad "clickTAG" convention. Assign a URL and the *whole*
+     * Stage becomes one big link — clicking anywhere on it (over placed
+     * text and stage objects too) opens that URL in a new window/tab, and
+     * the cursor becomes a pointer. A plain property, not a method call —
+     * set once (commonly in frame 1) and it stays in effect for the rest
+     * of the movie, in both the native app preview and the exported page.
+     * Unset (`undefined`) by default.
+     */
+    clickTag?: string;
 };
 
 declare const console: {

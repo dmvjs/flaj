@@ -34,13 +34,30 @@ extension TimelineDocument {
         webExportSheetPresented = true
     }
 
+    /// ⌘Return — Flash's own "Test Movie" shortcut, adapted here: no
+    /// settings sheet, no save panel, just the current webExport* settings
+    /// (whatever was last set, same as any other document property) run
+    /// straight through the same export pipeline `performWebExport` always
+    /// uses, to a fixed temp path, opened immediately in the system's
+    /// default browser — instant preview instead of export-then-go-find-it.
+    func previewInBrowser() {
+        stop()
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("Flaj Preview.html")
+        performWebExport(to: url)
+        NSWorkspace.shared.open(url)
+    }
+
     /// Called after the settings sheet is dismissed to pick a destination
     /// file. Options are set on `doc` already, so the panel itself carries
     /// no accessory view.
     func beginWebExportSavePanel() {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.html]
-        panel.nameFieldStringValue = webExportTitle.isEmpty ? "Untitled.html" : "\(webExportTitle).html"
+        // "index.html", unconditionally — not derived from webExportTitle
+        // (the page's <title>, unrelated to its filename): that's the
+        // standard entry-point name any static host (GitHub Pages, S3, an
+        // ad server upload) expects, independent of what the page is titled.
+        panel.nameFieldStringValue = "index.html"
         panel.begin { [weak self] response in
             Task { @MainActor in
                 guard response == .OK, let url = panel.url, let self else { return }
@@ -185,7 +202,10 @@ struct WebExportSettingsSheet: View {
     }
 }
 
-private struct StageAlignmentGrid: View {
+/// Not private: reused by PropertiesPanelView's Web Export section, which
+/// shows the same setting when nothing's selected on the Stage — not just
+/// the "Export Web Page…" sheet.
+struct StageAlignmentGrid: View {
     @Binding var selection: StageAlignment
 
     private static let order: [StageAlignment] = [
@@ -195,14 +215,14 @@ private struct StageAlignmentGrid: View {
     ]
 
     var body: some View {
-        LazyVGrid(columns: Array(repeating: GridItem(.fixed(20), spacing: 3), count: 3), spacing: 3) {
+        LazyVGrid(columns: Array(repeating: GridItem(.fixed(16), spacing: 2), count: 3), spacing: 2) {
             ForEach(Self.order, id: \.self) { alignment in
                 Button(action: { selection = alignment }) {
                     Circle()
                         .fill(selection == alignment ? Color.accentColor : Color.secondary.opacity(0.5))
-                        .frame(width: 6, height: 6)
-                        .frame(width: 20, height: 20)
-                        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 3))
+                        .frame(width: 5, height: 5)
+                        .frame(width: 16, height: 16)
+                        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 2))
                 }
                 .buttonStyle(.plain)
             }
