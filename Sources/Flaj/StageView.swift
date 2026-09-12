@@ -19,8 +19,19 @@ struct StageContentView: View {
                 StageTextView(obj: obj, scale: scale)
             }
             ForEach(doc.visibleLayers.filter { !$0.hidden }) { layer in
-                if let kf = layer.governingKeyframe(at: doc.playhead), layer.textFrames[kf] != nil {
-                    StagePlacedTextView(doc: doc, layer: layer, keyframe: kf, scale: scale)
+                if let kf = layer.governingKeyframe(at: doc.playhead) {
+                    if layer.textFrames[kf] != nil {
+                        StagePlacedTextView(doc: doc, layer: layer, keyframe: kf, scale: scale)
+                    } else if let instance = layer.symbolFrames[kf],
+                              instance.name.isEmpty || doc.stageObject(id: instance.name) == nil {
+                        // A named instance that's already spawned into
+                        // doc.stageObjects (see TimelineDocument.
+                        // spawnNamedInstances) is rendered by the
+                        // StageTextView loop above instead — it's now a
+                        // live, script-controlled object, not
+                        // Timeline-authored content.
+                        StageSymbolInstanceView(doc: doc, layer: layer, keyframe: kf, scale: scale)
+                    }
                 }
             }
             // The banner-ad clickTag convention (see TimelineDocument.
@@ -50,6 +61,7 @@ struct StageContentView: View {
             doc.placeText(at: stagePoint)
         case .selection:
             doc.selectedPlacement = nil
+            doc.selectedSymbolPlacement = nil
         }
     }
 
@@ -78,6 +90,9 @@ private struct OnionSkinOverlay: View {
                     ForEach(doc.visibleLayers.filter { !$0.hidden }) { layer in
                         if let placement = layer.interpolatedPlacedText(at: frame) {
                             ghost(placement, tint: offset < 0 ? .blue : .orange, spin: spinDegrees(layer: layer, at: frame))
+                        } else if let instance = layer.interpolatedSymbolInstance(at: frame),
+                                  let symbol = doc.library.first(where: { $0.id == instance.symbolID }) {
+                            ghost(instance, symbol: symbol, tint: offset < 0 ? .blue : .orange, spin: spinDegrees(layer: layer, at: frame))
                         }
                     }
                 }
@@ -107,6 +122,23 @@ private struct OnionSkinOverlay: View {
             .foregroundStyle(tint)
             .multilineTextAlignment(p.alignment.swiftUIAlignment)
             .frame(width: p.width * scale, height: p.height * scale, alignment: p.alignment.frameAlignment)
+            .opacity(0.35)
+            .scaleEffect(p.scale)
+            .rotationEffect(.degrees(p.rotation + spin))
+            .position(x: (p.x + p.width / 2) * scale, y: (p.y + p.height / 2) * scale)
+    }
+
+    /// Same idea as `ghost(_:tint:spin:)`, for a symbol instance — pulls the
+    /// text/font/color to render from the Library entry it references,
+    /// since (unlike PlacedText) an instance's own struct doesn't carry them.
+    private func ghost(_ p: SymbolInstance, symbol: FlajSymbol, tint: Color, spin: Double) -> some View {
+        Text(symbol.text)
+            .font(.custom(symbol.fontName, size: symbol.fontSize * scale))
+            .bold(symbol.bold)
+            .italic(symbol.italic)
+            .foregroundStyle(tint)
+            .multilineTextAlignment(symbol.alignment.swiftUIAlignment)
+            .frame(width: p.width * scale, height: p.height * scale, alignment: symbol.alignment.frameAlignment)
             .opacity(0.35)
             .scaleEffect(p.scale)
             .rotationEffect(.degrees(p.rotation + spin))
@@ -198,6 +230,30 @@ private struct StagePlacedTextView: View {
             // data-testid, invisible to VoiceOver users (unlike
             // accessibilityLabel), queryable via the accessibility tree.
             .accessibilityIdentifier("stage-placed-text")
+            .contextMenu {
+                // Right-click doesn't fire onTapGesture on macOS, so each
+                // action explicitly selects this placement first — matching
+                // what a left-click would have done — rather than assuming
+                // it's already `doc.selectedPlacement`.
+                Button("Cut") {
+                    doc.selectedPlacement = ref
+                    doc.copySelectedPlacement()
+                    doc.deleteSelectedPlacement()
+                }
+                Button("Copy") {
+                    doc.selectedPlacement = ref
+                    doc.copySelectedPlacement()
+                }
+                Button("Delete", role: .destructive) {
+                    doc.selectedPlacement = ref
+                    doc.deleteSelectedPlacement()
+                }
+                Divider()
+                Button("Convert to Symbol…") {
+                    doc.selectedPlacement = ref
+                    doc.convertSelectedTextToSymbol(name: placement.text)
+                }
+            }
     }
 
     private var moveGesture: some Gesture {
@@ -257,13 +313,143 @@ private struct StagePlacedTextView: View {
     }
 }
 
+/// A placed instance of a Library symbol — same drag/resize mechanics as
+/// `StagePlacedTextView` (see that view's own doc comments for why local
+/// `@State` + `.global` coordinate space matter here), rendering whatever
+/// text/font/color the referenced `FlajSymbol` currently has rather than
+/// carrying its own.
+private struct StageSymbolInstanceView: View {
+    let doc: TimelineDocument
+    let layer: TLLayer
+    let keyframe: Int
+    var scale: CGFloat
+
+    @State private var moveStart: SymbolInstance?
+    @State private var resizeStart: SymbolInstance?
+    @State private var liveDrag: SymbolInstance?
+
+    private var ref: TimelineDocument.SymbolPlacementRef {
+        TimelineDocument.SymbolPlacementRef(layerID: layer.id, keyframe: keyframe)
+    }
+    private var placement: SymbolInstance? { layer.symbolFrames[keyframe] }
+    private var isSelected: Bool { doc.selectedSymbolPlacement == ref }
+
+    private var displayPlacement: SymbolInstance? {
+        liveDrag ?? layer.interpolatedSymbolInstance(at: doc.playhead) ?? placement
+    }
+
+    private var symbol: FlajSymbol? {
+        guard let symbolID = placement?.symbolID else { return nil }
+        return doc.library.first { $0.id == symbolID }
+    }
+
+    private var spinDegrees: Double {
+        guard let endKf = layer.tweenTarget(from: keyframe), endKf > keyframe else { return 0 }
+        let settings = layer.tweenSettings[keyframe] ?? TweenSettings()
+        let rawT = Double(doc.playhead - keyframe) / Double(endKf - keyframe)
+        return settings.spinDegrees(at: rawT)
+    }
+
+    var body: some View {
+        if let shown = displayPlacement, let symbol {
+            Text(symbol.text)
+                .font(.custom(symbol.fontName, size: symbol.fontSize * scale))
+                .bold(symbol.bold)
+                .italic(symbol.italic)
+                .foregroundStyle(Color(hex: symbol.colorHex))
+                .multilineTextAlignment(symbol.alignment.swiftUIAlignment)
+                .frame(width: shown.width * scale, height: shown.height * scale,
+                       alignment: symbol.alignment.frameAlignment)
+                .opacity(shown.opacity)
+                .contentShape(Rectangle())
+                .overlay(isSelected ? Rectangle().stroke(Color.accentColor, lineWidth: 1.5) : nil)
+                .overlay(alignment: .bottomTrailing) { if isSelected { resizeHandle } }
+                .scaleEffect(shown.scale)
+                .rotationEffect(.degrees(shown.rotation + spinDegrees))
+                .position(x: (shown.x + shown.width / 2) * scale, y: (shown.y + shown.height / 2) * scale)
+                .onTapGesture {
+                    doc.selectedSymbolPlacement = ref
+                    doc.selectedPlacement = nil
+                }
+                .gesture(moveGesture)
+                .accessibilityIdentifier("stage-symbol-instance")
+                .contextMenu {
+                    Button("Cut") {
+                        doc.selectedSymbolPlacement = ref
+                        doc.copySelectedSymbolPlacement()
+                        doc.deleteSelectedSymbolPlacement()
+                    }
+                    Button("Copy") {
+                        doc.selectedSymbolPlacement = ref
+                        doc.copySelectedSymbolPlacement()
+                    }
+                    Button("Delete", role: .destructive) {
+                        doc.selectedSymbolPlacement = ref
+                        doc.deleteSelectedSymbolPlacement()
+                    }
+                }
+        }
+    }
+
+    private var moveGesture: some Gesture {
+        DragGesture(minimumDistance: 1, coordinateSpace: .global)
+            .onChanged { value in
+                guard doc.selectedTool == .selection, let placement else { return }
+                let start = moveStart ?? placement
+                if moveStart == nil { moveStart = start }
+                var p = start
+                p.x = start.x + value.translation.width / scale
+                p.y = start.y + value.translation.height / scale
+                liveDrag = p
+            }
+            .onEnded { _ in
+                if let liveDrag {
+                    doc.withUndoSnapshot(coalesce: ref.undoToken) {
+                        doc.selectedSymbolPlacement = ref
+                        doc.selectedPlacement = nil
+                        layer.symbolFrames[keyframe] = liveDrag
+                    }
+                }
+                moveStart = nil
+                liveDrag = nil
+            }
+    }
+
+    private var resizeHandle: some View {
+        Rectangle()
+            .fill(Color.accentColor)
+            .frame(width: 8, height: 8)
+            .gesture(
+                DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                    .onChanged { value in
+                        guard let placement else { return }
+                        let start = resizeStart ?? placement
+                        if resizeStart == nil { resizeStart = start }
+                        var p = start
+                        p.width = max(20, start.width + value.translation.width / scale)
+                        p.height = max(16, start.height + value.translation.height / scale)
+                        liveDrag = p
+                    }
+                    .onEnded { _ in
+                        if let liveDrag {
+                            doc.withUndoSnapshot(coalesce: ref.undoToken) { layer.symbolFrames[keyframe] = liveDrag }
+                        }
+                        resizeStart = nil
+                        liveDrag = nil
+                    }
+            )
+    }
+}
+
 private struct StageTextView: View {
     let obj: StageObject
     var scale: CGFloat
 
     var body: some View {
         Text(obj.text)
-            .font(.system(size: obj.fontSize * scale))
+            .font(.custom(obj.fontName, size: obj.fontSize * scale))
+            .bold(obj.bold)
+            .italic(obj.italic)
             .foregroundStyle(obj.color)
             .scaleEffect(obj.scale)
             .rotationEffect(.degrees(obj.rotation))
@@ -326,54 +512,90 @@ struct StageView: View {
         }
     }
 
-    /// Arrow keys move the selected placed-text box 1pt per press, 10pt
-    /// with Shift held — Flash's classic nudge amounts — plus Delete
-    /// (removes the selected placement) and Cmd+C/Cmd+V (copy/paste it,
-    /// pasting into whatever's currently selected on the Timeline, not
-    /// necessarily back onto the same frame — so copy, click a different
-    /// frame, paste lands it there). Returns whether the event was
-    /// consumed; when nothing applies it isn't, so the key event
-    /// propagates normally. The actual moves/copy/paste/delete are
-    /// TimelineDocument methods, each with their own direct unit test.
+    /// Arrow keys move the selected Stage item — a placed text box or a
+    /// symbol instance, whichever is currently selected — 1pt per press,
+    /// 10pt with Shift held — Flash's classic nudge amounts — plus Delete
+    /// (removes the selection), Cmd+C/Cmd+V (copy/paste it, pasting into
+    /// whatever's currently selected on the Timeline, not necessarily back
+    /// onto the same frame — so copy, click a different frame, paste lands
+    /// it there), and Cmd+X (copy then delete in one step — cheap to add
+    /// since it's just those two existing operations back to back). Text
+    /// and symbol placements keep separate clipboards (`hasCopiedText`/
+    /// `hasCopiedSymbolInstance`) — Cmd+V picks whichever one matches the
+    /// current selection so pasting can't silently swap content kinds.
+    /// Returns whether the event was consumed; when nothing applies it
+    /// isn't, so the key event propagates normally. The actual moves/copy/
+    /// paste/delete are TimelineDocument methods, each with their own
+    /// direct unit test.
     private func nudgeSelection(_ event: NSEvent) -> Bool {
         // Don't steal keys from an actively-focused text field/editor
         // elsewhere in the app (the Actions panel's script editor, a
         // Properties panel field, etc.) — this monitor fires for every
-        // keyDown app-wide, and Delete/Cmd+C/Cmd+V need to mean "edit the
-        // Stage selection" only when nothing else has focus that would
+        // keyDown app-wide, and Delete/Cmd+C/Cmd+V/Cmd+X need to mean "edit
+        // the Stage selection" only when nothing else has focus that would
         // more naturally claim them.
         if let responder = NSApp.keyWindow?.firstResponder, responder is NSTextView { return false }
 
         if event.modifierFlags.contains(.command) {
             switch event.charactersIgnoringModifiers?.lowercased() {
             case "c":
-                guard doc.selectedPlacement != nil else { return false }
-                doc.copySelectedPlacement()
-                return true
+                if doc.selectedPlacement != nil { doc.copySelectedPlacement(); return true }
+                if doc.selectedSymbolPlacement != nil { doc.copySelectedSymbolPlacement(); return true }
+                return false
+            case "x":
+                if doc.selectedPlacement != nil {
+                    doc.copySelectedPlacement()
+                    doc.deleteSelectedPlacement()
+                    return true
+                }
+                if doc.selectedSymbolPlacement != nil {
+                    doc.copySelectedSymbolPlacement()
+                    doc.deleteSelectedSymbolPlacement()
+                    return true
+                }
+                return false
             case "v":
-                guard doc.hasCopiedText, let layer = doc.selectedLayer else { return false }
-                doc.pastePlacedText(layer: layer, at: doc.selectedFrame)
-                return true
+                guard let layer = doc.selectedLayer else { return false }
+                // Symbol paste wins if both clipboards happen to be
+                // populated and a symbol instance is (or was) selected —
+                // matches which selection Cmd+C would have just set.
+                if doc.selectedSymbolPlacement != nil, doc.hasCopiedSymbolInstance {
+                    doc.pasteSymbolInstance(layer: layer, at: doc.selectedFrame)
+                    return true
+                }
+                if doc.hasCopiedText {
+                    doc.pastePlacedText(layer: layer, at: doc.selectedFrame)
+                    return true
+                }
+                if doc.hasCopiedSymbolInstance {
+                    doc.pasteSymbolInstance(layer: layer, at: doc.selectedFrame)
+                    return true
+                }
+                return false
             default:
                 return false
             }
         }
 
-        guard doc.selectedPlacement != nil else { return false }
+        guard doc.selectedPlacement != nil || doc.selectedSymbolPlacement != nil else { return false }
 
         if event.keyCode == 51 || event.keyCode == 117 { // Delete (backspace) / Forward Delete
-            doc.deleteSelectedPlacement()
+            if doc.selectedPlacement != nil { doc.deleteSelectedPlacement() }
+            if doc.selectedSymbolPlacement != nil { doc.deleteSelectedSymbolPlacement() }
             return true
         }
 
         let step: CGFloat = event.modifierFlags.contains(.shift) ? 10 : 1
+        let (dx, dy): (CGFloat, CGFloat)
         switch Int(event.keyCode) {
-        case 126: doc.nudgeSelectedPlacement(dx: 0, dy: -step) // up
-        case 125: doc.nudgeSelectedPlacement(dx: 0, dy: step)  // down
-        case 123: doc.nudgeSelectedPlacement(dx: -step, dy: 0) // left
-        case 124: doc.nudgeSelectedPlacement(dx: step, dy: 0)  // right
+        case 126: (dx, dy) = (0, -step) // up
+        case 125: (dx, dy) = (0, step)  // down
+        case 123: (dx, dy) = (-step, 0) // left
+        case 124: (dx, dy) = (step, 0)  // right
         default: return false
         }
+        if doc.selectedPlacement != nil { doc.nudgeSelectedPlacement(dx: dx, dy: dy) }
+        if doc.selectedSymbolPlacement != nil { doc.nudgeSelectedSymbolPlacement(dx: dx, dy: dy) }
         return true
     }
 }

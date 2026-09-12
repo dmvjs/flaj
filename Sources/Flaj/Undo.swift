@@ -30,6 +30,7 @@ extension TimelineDocument {
         let playhead: Int
         let selectedFrame: Int
         let selectedPlacement: TextPlacementRef?
+        let selectedSymbolPlacement: SymbolPlacementRef?
     }
 
     static let undoStackLimit = 200
@@ -40,7 +41,8 @@ extension TimelineDocument {
     private func makeUndoEntry() -> UndoEntry {
         UndoEntry(
             file: makeSaveFile(), selectedLayerID: selectedLayerID,
-            playhead: playhead, selectedFrame: selectedFrame, selectedPlacement: selectedPlacement
+            playhead: playhead, selectedFrame: selectedFrame, selectedPlacement: selectedPlacement,
+            selectedSymbolPlacement: selectedSymbolPlacement
         )
     }
 
@@ -107,6 +109,12 @@ extension TimelineDocument {
             selectedPlacement = ref
         } else {
             selectedPlacement = nil
+        }
+        if let ref = entry.selectedSymbolPlacement,
+           layers.first(where: { $0.id == ref.layerID })?.symbolFrames[ref.keyframe] != nil {
+            selectedSymbolPlacement = ref
+        } else {
+            selectedSymbolPlacement = nil
         }
     }
 }

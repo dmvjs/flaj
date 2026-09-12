@@ -86,6 +86,27 @@ a second tween call on the same object+property replaces the one already in
 flight rather than stacking. Easing is `'linear'` (default), `'easeIn'`,
 `'easeOut'`, or `'easeInOut'`.
 
+### Named symbol instances
+
+A symbol instance placed on the Timeline (see "Symbols" in the README) can
+carry an instance name, set in the Properties panel's "Name" field when the
+instance is selected. The moment the playhead reaches that instance's
+keyframe, it's addressable through the exact same `stage.setTransform`/
+`stage.tween`/`stage.setText` calls above — same `id` namespace as a
+script-created object, so `stage.addText('badge1', ...)` is a no-op if
+`'badge1'` is already a spawned instance, same as colliding with any other
+`addText`.
+
+```js
+// Symbol instance placed on the Timeline named "badge1":
+stage.tween('badge1', { x: 300, rotation: 15 }, 20, 'easeOut');
+```
+
+Spawning is a one-time snapshot, not a live link back to the Library: once
+an instance has spawned, further edits to its symbol or its Timeline
+placement don't retroactively move it — it's an independent object from
+then on, same as anything else `stage.addText` created.
+
 ## Click-through (clickTag)
 
 The banner-ad "clickTAG" convention — a plain property, not a method:

@@ -77,7 +77,7 @@ struct FlajApp: App {
                 Button("Export GIF…") { doc.exportGIF() }
                 Button("Export Web Page…") { doc.exportWebPage() }
                 Divider()
-                Button("Preview in Browser") { doc.previewInBrowser() }
+                Button("Test Movie") { doc.testMovie() }
                     .keyboardShortcut(.return, modifiers: .command)
             }
             CommandMenu("Insert") {

@@ -522,7 +522,7 @@ private struct FrameCellSlot: View {
             mark: columnIndex < layer.frames.count ? layer.frames[columnIndex] : .empty,
             columnIndex: columnIndex,
             dimmed: layer.hidden,
-            isSelected: doc.selectedLayerID == layer.id && doc.selectedFrameRange.contains(frame),
+            isSelected: doc.hasSelectedFrame && doc.selectedLayerID == layer.id && doc.selectedFrameRange.contains(frame),
             isDropTarget: isDropTarget
         )
         .frame(width: frameWidth, height: rowHeight)
@@ -562,6 +562,11 @@ private struct FrameCellSlot: View {
                 .disabled(doc.selectedPlacement == nil)
             Button("Paste Text") { doc.pastePlacedText(layer: layer, at: frame) }
                 .disabled(!doc.hasCopiedText)
+            Button("Convert to Symbol") {
+                doc.selectFrame(layer: layer, frame: frame, extend: false)
+                doc.convertSelectedTextToSymbol(name: layer.textFrames[frame]?.text ?? "Symbol")
+            }
+            .disabled(layer.textFrames[frame] == nil)
             Divider()
             Button("Copy Frames") { doc.copySelectedFrames() }
                 .disabled(doc.selectedLayerID != layer.id)

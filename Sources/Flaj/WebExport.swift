@@ -1,6 +1,17 @@
 import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
+import WebKit
+
+// Kept alive here rather than as a TimelineDocument property: it's pure
+// preview-window plumbing, not document state, and `isReleasedWhenClosed =
+// false` on the window (see showPreviewWindow) means without a strong
+// reference somewhere it would deallocate the instant this function
+// returns. Closing the previous preview before opening a new one, rather
+// than piling up windows, matches Flash's own "Test Movie" replacing its
+// player window on every re-test.
+@MainActor
+private var activePreviewWindow: NSWindow?
 
 /// How the exported Stage scales to whatever page or iframe embeds it —
 /// same vocabulary as CSS `object-fit`.
@@ -38,13 +49,45 @@ extension TimelineDocument {
     /// settings sheet, no save panel, just the current webExport* settings
     /// (whatever was last set, same as any other document property) run
     /// straight through the same export pipeline `performWebExport` always
-    /// uses, to a fixed temp path, opened immediately in the system's
-    /// default browser — instant preview instead of export-then-go-find-it.
-    func previewInBrowser() {
+    /// uses, to a fixed temp path — instant preview instead of
+    /// export-then-go-find-it. Opens in a dedicated native window sized to
+    /// the Stage's own pixel dimensions (see `showPreviewWindow`), not the
+    /// system default browser: Flash's actual Test Movie opened a
+    /// standalone player window sized to the movie, and NSWorkspace has no
+    /// way to size the window a system browser opens.
+    func testMovie() {
         stop()
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("Flaj Preview.html")
         performWebExport(to: url)
-        NSWorkspace.shared.open(url)
+        showPreviewWindow(fileURL: url)
+    }
+
+    /// A plain `WKWebView` in a borderless-content `NSWindow`, sized so its
+    /// *content* area — not the outer window frame including the title bar
+    /// — is exactly `stageWidth`×`stageHeight`, so what's visible below the
+    /// title bar always matches the Stage's real pixel size regardless of
+    /// zoom/scale, the same guarantee Flash's Test Movie player window gave.
+    private func showPreviewWindow(fileURL: URL) {
+        activePreviewWindow?.close()
+
+        let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: stageWidth, height: stageHeight))
+        webView.autoresizingMask = [.width, .height]
+        webView.loadFileURL(fileURL, allowingReadAccessTo: fileURL.deletingLastPathComponent())
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: stageWidth, height: stageHeight),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            backing: .buffered, defer: false
+        )
+        window.title = webExportTitle.isEmpty ? "Flaj Preview" : webExportTitle
+        window.contentView = webView
+        window.setContentSize(NSSize(width: stageWidth, height: stageHeight))
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+
+        activePreviewWindow = window
     }
 
     /// Called after the settings sheet is dismissed to pick a destination

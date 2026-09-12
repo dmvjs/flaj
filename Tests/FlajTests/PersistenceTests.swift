@@ -29,6 +29,7 @@ final class PersistenceTests: XCTestCase {
         XCTAssertEqual(reloaded.layers.count, original.layers.count)
         // load(from:) re-selects the first layer, same as opening a document fresh.
         XCTAssertEqual(reloaded.selectedLayerID, reloaded.layers.first?.id)
+        XCTAssertEqual(reloaded.library, original.library)
 
         for (want, got) in zip(original.layers, reloaded.layers) {
             XCTAssertEqual(got.name, want.name)
@@ -41,6 +42,7 @@ final class PersistenceTests: XCTestCase {
             XCTAssertEqual(got.frames, want.frames)
             XCTAssertEqual(got.frameScripts, want.frameScripts)
             XCTAssertEqual(got.textFrames, want.textFrames)
+            XCTAssertEqual(got.symbolFrames, want.symbolFrames)
             XCTAssertEqual(got.tweenSettings, want.tweenSettings)
             XCTAssertEqual(got.colorTweenSettings, want.colorTweenSettings)
             XCTAssertEqual(got.frameLabels, want.frameLabels)
@@ -74,7 +76,9 @@ final class PersistenceTests: XCTestCase {
 
         let file = try JSONDecoder().decode(FlajDocumentFile.self, from: legacyJSON)
         XCTAssertTrue(file.layers[0].textFrames.isEmpty)
+        XCTAssertTrue(file.layers[0].symbolFrames.isEmpty)
         XCTAssertTrue(file.layers[0].tweenSettings.isEmpty)
+        XCTAssertTrue(file.library.isEmpty)
 
         let doc = TimelineDocument(layers: [TLLayer(name: "placeholder", swatch: .black, frames: [.empty])], totalFrames: 1)
         doc.load(from: file)

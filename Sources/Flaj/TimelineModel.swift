@@ -67,6 +67,12 @@ final class TLLayer: Identifiable {
     var frames: [FrameMark]
     var frameScripts: [Int: String] = [:]   // 1-based frame number -> JS/TS source
     var textFrames: [Int: PlacedText] = [:] // 1-based keyframe number -> placed text
+    // Instances of a Library symbol (see FlajSymbol/SymbolInstance in
+    // StageObject.swift) placed on this layer — same one-per-keyframe shape
+    // as textFrames, and a given keyframe carries at most one of the two
+    // (a layer's content is either authored text or a symbol instance,
+    // never both at once).
+    var symbolFrames: [Int: SymbolInstance] = [:]
     // Named keyframes — a navigation target for gotoAndPlay("name")/
     // gotoAndStop("name")/goto("name") from a frame script, matching
     // Flash's own frame labels. Purely a keyframe annotation, same
@@ -164,6 +170,27 @@ final class TLLayer: Identifiable {
         return result
     }
 
+    /// Same idea as `interpolatedPlacedText`, for a symbol instance span —
+    /// no colorHex/text to interpolate (that's the symbol's shared content,
+    /// not per-instance), just geometry, eased the same way position/size
+    /// already are.
+    func interpolatedSymbolInstance(at frame: Int) -> SymbolInstance? {
+        guard let kf = governingKeyframe(at: frame), let base = symbolFrames[kf] else { return nil }
+        guard let endKf = tweenTarget(from: kf), let end = symbolFrames[endKf], endKf > kf else { return base }
+        let rawT = Double(frame - kf) / Double(endKf - kf)
+        let t = (tweenSettings[kf] ?? TweenSettings()).easedProgress(rawT)
+        let colorT = (colorTweenSettings[kf] ?? TweenSettings()).easedProgress(rawT)
+        var result = base
+        result.x = base.x + (end.x - base.x) * t
+        result.y = base.y + (end.y - base.y) * t
+        result.width = base.width + (end.width - base.width) * t
+        result.height = base.height + (end.height - base.height) * t
+        result.scale = base.scale + (end.scale - base.scale) * t
+        result.rotation = base.rotation + (end.rotation - base.rotation) * t
+        result.opacity = base.opacity + (end.opacity - base.opacity) * colorT
+        return result
+    }
+
     /// Linearly interpolates two "#rrggbb" colors by `t` (0...1), channel by
     /// channel — the standard sRGB lerp, matching how CSS itself interpolates
     /// a `color` animation between two hex values (see player.js), so the
@@ -226,6 +253,14 @@ final class TimelineDocument {
     // through every frame as the movie runs.
     var selectedFrame: Int = 1
 
+    // Whether `selectedFrame` reflects a real click, not just its default
+    // value of 1 — a brand new document shouldn't open with frame 1 looking
+    // selected in the grid before the user has ever clicked anything.
+    // `selectedFrame` itself still defaults to 1 regardless (F5/F6-type
+    // actions before any click need a sane frame to act on), so this stays
+    // a separate flag rather than making `selectedFrame` optional.
+    var hasSelectedFrame: Bool = false
+
     // Shift-click range extension on the timeline grid, anchored at
     // `selectedFrame`. Only meaningful on `selectedLayerID`'s row — picking
     // a different layer (with or without shift) starts a fresh anchor there
@@ -254,16 +289,25 @@ final class TimelineDocument {
     /// section for those frames — selecting a placement there would
     /// silently hide it (text and tween sections are mutually exclusive).
     func selectFrame(layer: TLLayer, frame: Int, extend: Bool) {
+        hasSelectedFrame = true
         if extend && selectedLayerID == layer.id {
             selectedPlacement = nil
+            selectedSymbolPlacement = nil
             rangeSelectionEnd = frame
         } else {
             selectedLayerID = layer.id
             gotoAndStop(frame)
             rangeSelectionEnd = nil
-            selectedPlacement = layer.textFrames[frame] != nil
-                ? TextPlacementRef(layerID: layer.id, keyframe: frame)
-                : nil
+            if layer.textFrames[frame] != nil {
+                selectedPlacement = TextPlacementRef(layerID: layer.id, keyframe: frame)
+                selectedSymbolPlacement = nil
+            } else if layer.symbolFrames[frame] != nil {
+                selectedSymbolPlacement = SymbolPlacementRef(layerID: layer.id, keyframe: frame)
+                selectedPlacement = nil
+            } else {
+                selectedPlacement = nil
+                selectedSymbolPlacement = nil
+            }
         }
     }
 
@@ -294,6 +338,12 @@ final class TimelineDocument {
     var consoleMessages: [ConsoleMessage] = []
 
     var currentFileURL: URL?
+
+    // The Library — Flash's term for the document's reusable Symbol
+    // definitions (see FlajSymbol in StageObject.swift). Placed instances
+    // live on individual layers (TLLayer.symbolFrames); this is just the
+    // shared content they all point back to.
+    var library: [FlajSymbol] = []
 
     var stageObjects: [StageObject] = []
     @ObservationIgnored private var activeTweens: [ActiveTween] = []
@@ -340,6 +390,155 @@ final class TimelineDocument {
     var selectedTool: StageTool = .selection
     var selectedPlacement: TextPlacementRef?
 
+    // MARK: - Symbol instances (Library placements)
+
+    struct SymbolPlacementRef: Equatable {
+        let layerID: UUID; let keyframe: Int
+        var undoToken: String { "symbolplacement:\(layerID)-\(keyframe)" }
+    }
+
+    var selectedSymbolPlacement: SymbolPlacementRef?
+
+    /// Wraps the selected text placement's content in a new Library symbol
+    /// and swaps the placement on the Timeline for an instance of it,
+    /// keeping the exact same position/size/scale/rotation/opacity so
+    /// nothing visibly moves — only what governs it changes, from one-off
+    /// text to a reusable, instanceable symbol.
+    func convertSelectedTextToSymbol(name: String) {
+        guard let ref = selectedPlacement, let layer = layers.first(where: { $0.id == ref.layerID }),
+              let text = layer.textFrames[ref.keyframe] else { return }
+        withUndoSnapshot {
+            let symbol = FlajSymbol(
+                name: name, text: text.text, fontName: text.fontName, fontSize: text.fontSize,
+                bold: text.bold, italic: text.italic, colorHex: text.colorHex, alignment: text.alignment
+            )
+            library.append(symbol)
+            layer.textFrames[ref.keyframe] = nil
+            layer.symbolFrames[ref.keyframe] = SymbolInstance(
+                symbolID: symbol.id, x: text.x, y: text.y, width: text.width, height: text.height,
+                opacity: text.opacity, scale: text.scale, rotation: text.rotation
+            )
+            selectedPlacement = nil
+            selectedSymbolPlacement = SymbolPlacementRef(layerID: layer.id, keyframe: ref.keyframe)
+        }
+    }
+
+    /// Drops a new instance of `symbol` onto `selectedLayer` at the
+    /// keyframe governing `selectedFrame`, centered on the Stage — same
+    /// "needs an actual keyframe" rule as `placeText`. Selects the new
+    /// instance so it's immediately draggable into position.
+    func placeSymbolInstance(_ symbol: FlajSymbol) {
+        guard let layer = selectedLayer else { return }
+        guard let kf = layer.governingKeyframe(at: selectedFrame) else {
+            logToConsole("Select or insert a keyframe on \"\(layer.name)\" before placing an instance.", level: .warn)
+            return
+        }
+        withUndoSnapshot {
+            let width: CGFloat = 160, height: CGFloat = 40
+            let instance = SymbolInstance(
+                symbolID: symbol.id, x: (stageWidth - width) / 2, y: (stageHeight - height) / 2,
+                width: width, height: height
+            )
+            layer.symbolFrames[kf] = instance
+            layer.textFrames[kf] = nil
+            selectedPlacement = nil
+            selectedSymbolPlacement = SymbolPlacementRef(layerID: layer.id, keyframe: kf)
+        }
+    }
+
+    func deleteSelectedSymbolPlacement() {
+        guard let ref = selectedSymbolPlacement, let layer = layers.first(where: { $0.id == ref.layerID }) else { return }
+        withUndoSnapshot {
+            layer.symbolFrames[ref.keyframe] = nil
+            selectedSymbolPlacement = nil
+        }
+    }
+
+    /// Same idiom as `binding(for:)` for text placements — the `?? ...`
+    /// fallback is only ever hit if `ref` outlives its own placement (same
+    /// defensive default `binding(for: TextPlacementRef)` has).
+    func binding(for ref: SymbolPlacementRef) -> Binding<SymbolInstance>? {
+        guard let layer = layers.first(where: { $0.id == ref.layerID }) else { return nil }
+        return Binding(
+            get: { layer.symbolFrames[ref.keyframe] ?? SymbolInstance(symbolID: UUID(), x: 0, y: 0) },
+            set: { newValue in
+                self.withUndoSnapshot(coalesce: ref.undoToken) { layer.symbolFrames[ref.keyframe] = newValue }
+            }
+        )
+    }
+
+    /// Same arrow-key nudge as `nudgeSelectedPlacement`, for a selected
+    /// symbol instance.
+    func nudgeSelectedSymbolPlacement(dx: CGFloat, dy: CGFloat) {
+        guard let ref = selectedSymbolPlacement, let binding = binding(for: ref) else { return }
+        binding.wrappedValue.x += dx
+        binding.wrappedValue.y += dy
+    }
+
+    @ObservationIgnored private var copiedSymbolInstance: SymbolInstance?
+
+    var hasCopiedSymbolInstance: Bool { copiedSymbolInstance != nil }
+
+    func copySelectedSymbolPlacement() {
+        guard let ref = selectedSymbolPlacement, let layer = layers.first(where: { $0.id == ref.layerID }) else { return }
+        copiedSymbolInstance = layer.symbolFrames[ref.keyframe]
+    }
+
+    /// Same idiom as `pastePlacedText`.
+    func pasteSymbolInstance(layer: TLLayer, at frame: Int) {
+        guard let copied = copiedSymbolInstance else { return }
+        withUndoSnapshot {
+            let kf: Int
+            if let existing = layer.governingKeyframe(at: frame), existing == frame {
+                kf = existing
+            } else {
+                insertKeyframe(layer: layer, at: frame, blank: false)
+                kf = frame
+            }
+            layer.symbolFrames[kf] = copied
+            layer.textFrames[kf] = nil
+            selectedSymbolPlacement = SymbolPlacementRef(layerID: layer.id, keyframe: kf)
+            selectedPlacement = nil
+        }
+    }
+
+    func renameSymbol(_ symbolID: UUID, to name: String) {
+        guard let idx = library.firstIndex(where: { $0.id == symbolID }) else { return }
+        withUndoSnapshot(coalesce: "symbolname:\(symbolID)") { library[idx].name = name }
+    }
+
+    /// A read/write binding onto one Library symbol's shared content — same
+    /// idiom as `binding(for:)`, edits ripple to every instance since every
+    /// instance just references this same `symbolID`.
+    func symbolBinding(_ symbolID: UUID) -> Binding<FlajSymbol>? {
+        guard let idx = library.firstIndex(where: { $0.id == symbolID }) else { return nil }
+        return Binding(
+            get: { self.library[idx] },
+            set: { newValue in
+                self.withUndoSnapshot(coalesce: "symbol:\(symbolID)") { self.library[idx] = newValue }
+            }
+        )
+    }
+
+    /// Removes a symbol from the Library along with every instance of it
+    /// across every layer/frame — an orphaned instance (symbolID pointing
+    /// at nothing) would just render blank, so this keeps the document
+    /// consistent instead of leaving that dangling.
+    func deleteSymbol(_ symbolID: UUID) {
+        guard let idx = library.firstIndex(where: { $0.id == symbolID }) else { return }
+        withUndoSnapshot {
+            library.remove(at: idx)
+            for layer in layers {
+                for (frame, instance) in layer.symbolFrames where instance.symbolID == symbolID {
+                    layer.symbolFrames[frame] = nil
+                }
+            }
+            if let ref = selectedSymbolPlacement, layers.first(where: { $0.id == ref.layerID })?.symbolFrames[ref.keyframe] == nil {
+                selectedSymbolPlacement = nil
+            }
+        }
+    }
+
     // MARK: - Onion skinning
     //
     // A Stage-only editing aid — ghosted nearby-frame content — not part of
@@ -367,7 +566,9 @@ final class TimelineDocument {
         withUndoSnapshot {
             let placement = PlacedText(x: point.x, y: point.y)
             layer.textFrames[kf] = placement
+            layer.symbolFrames[kf] = nil
             selectedPlacement = TextPlacementRef(layerID: layer.id, keyframe: kf)
+            selectedSymbolPlacement = nil
         }
     }
 
@@ -465,7 +666,9 @@ final class TimelineDocument {
                 kf = frame
             }
             layer.textFrames[kf] = copied
+            layer.symbolFrames[kf] = nil
             selectedPlacement = TextPlacementRef(layerID: layer.id, keyframe: kf)
+            selectedSymbolPlacement = nil
         }
     }
 
@@ -481,6 +684,7 @@ final class TimelineDocument {
         let marks: [FrameMark]
         let scripts: [Int: String]
         let textFrames: [Int: PlacedText]
+        let symbolFrames: [Int: SymbolInstance]
         let tweenSettings: [Int: TweenSettings]
         let colorTweenSettings: [Int: TweenSettings]
         let labels: [Int: String]
@@ -496,6 +700,7 @@ final class TimelineDocument {
         var marks: [FrameMark] = []
         var scripts: [Int: String] = [:]
         var textFrames: [Int: PlacedText] = [:]
+        var symbolFrames: [Int: SymbolInstance] = [:]
         var tweenSettings: [Int: TweenSettings] = [:]
         var colorTweenSettings: [Int: TweenSettings] = [:]
         var labels: [Int: String] = [:]
@@ -503,12 +708,13 @@ final class TimelineDocument {
             marks.append(frame - 1 < layer.frames.count ? layer.frames[frame - 1] : .empty)
             if let v = layer.frameScripts[frame] { scripts[offset] = v }
             if let v = layer.textFrames[frame] { textFrames[offset] = v }
+            if let v = layer.symbolFrames[frame] { symbolFrames[offset] = v }
             if let v = layer.tweenSettings[frame] { tweenSettings[offset] = v }
             if let v = layer.colorTweenSettings[frame] { colorTweenSettings[offset] = v }
             if let v = layer.frameLabels[frame] { labels[offset] = v }
         }
         copiedFrames = CopiedFrames(
-            marks: marks, scripts: scripts, textFrames: textFrames,
+            marks: marks, scripts: scripts, textFrames: textFrames, symbolFrames: symbolFrames,
             tweenSettings: tweenSettings, colorTweenSettings: colorTweenSettings, labels: labels
         )
     }
@@ -526,6 +732,7 @@ final class TimelineDocument {
             }
             for (offset, v) in copied.scripts { layer.frameScripts[startFrame + offset] = v }
             for (offset, v) in copied.textFrames { layer.textFrames[startFrame + offset] = v }
+            for (offset, v) in copied.symbolFrames { layer.symbolFrames[startFrame + offset] = v }
             for (offset, v) in copied.tweenSettings { layer.tweenSettings[startFrame + offset] = v }
             for (offset, v) in copied.colorTweenSettings { layer.colorTweenSettings[startFrame + offset] = v }
             for (offset, v) in copied.labels { layer.frameLabels[startFrame + offset] = v }
@@ -543,16 +750,17 @@ final class TimelineDocument {
     func createTween(layer: TLLayer, from startFrame: Int, to endFrame: Int) {
         guard startFrame != endFrame else { return }
         let lo = min(startFrame, endFrame), hi = max(startFrame, endFrame)
-        guard layer.isKeyframe(at: lo), layer.textFrames[lo] != nil else {
-            logToConsole("Create Tween needs a keyframe with placed text at the start of the range.", level: .warn)
+        guard layer.isKeyframe(at: lo), layer.textFrames[lo] != nil || layer.symbolFrames[lo] != nil else {
+            logToConsole("Create Tween needs a keyframe with content at the start of the range.", level: .warn)
             return
         }
         withUndoSnapshot {
             if !layer.isKeyframe(at: hi) {
                 insertKeyframe(layer: layer, at: hi, blank: false)
             }
-            if layer.textFrames[hi] == nil {
+            if layer.textFrames[hi] == nil && layer.symbolFrames[hi] == nil {
                 layer.textFrames[hi] = layer.textFrames[lo]
+                layer.symbolFrames[hi] = layer.symbolFrames[lo]
             }
             growCapacity(to: max(totalFrames, hi))
             for f in (lo + 1)..<hi {
@@ -590,8 +798,10 @@ final class TimelineDocument {
         withUndoSnapshot {
             growCapacity(to: max(totalFrames, newEnd))
             let movedText = layer.textFrames[oldEnd]
+            let movedSymbol = layer.symbolFrames[oldEnd]
             let movedScript = layer.frameScripts[oldEnd]
             layer.textFrames[oldEnd] = nil
+            layer.symbolFrames[oldEnd] = nil
             layer.frameScripts[oldEnd] = nil
 
             if newEnd > oldEnd {
@@ -600,6 +810,7 @@ final class TimelineDocument {
                 for f in (newEnd + 1)...oldEnd { layer.frames[f - 1] = .empty }
             }
             layer.textFrames[newEnd] = movedText
+            layer.symbolFrames[newEnd] = movedSymbol
             layer.frameScripts[newEnd] = movedScript
             layer.frames[newEnd - 1] = .keyframe(hasScript: !(movedScript ?? "").isEmpty)
 
@@ -638,11 +849,13 @@ final class TimelineDocument {
             let mark = layer.frames[from - 1]
             let script = layer.frameScripts[from]
             let text = layer.textFrames[from]
+            let symbol = layer.symbolFrames[from]
             let label = layer.frameLabels[from]
 
             layer.frames[from - 1] = .empty
             layer.frameScripts[from] = nil
             layer.textFrames[from] = nil
+            layer.symbolFrames[from] = nil
             layer.frameLabels[from] = nil
             // Any `.plain` continuation this keyframe was governing is now
             // ungoverned (nothing behind it to continue from) — clear it
@@ -656,6 +869,7 @@ final class TimelineDocument {
             layer.frames[to - 1] = mark
             layer.frameScripts[to] = script
             layer.textFrames[to] = text
+            layer.symbolFrames[to] = symbol
             layer.frameLabels[to] = label
 
             if selectedFrame == from { selectedFrame = to }
@@ -1031,6 +1245,7 @@ final class TimelineDocument {
     /// layers — this is what makes `stop()`/`gotoAndPlay()`/etc. in a
     /// frame's code actually reach the runtime.
     private func runScriptsOnCurrentFrame() {
+        spawnNamedInstances()
         for layer in layers {
             guard layer.isKeyframe(at: playhead),
                   let script = layer.frameScripts[playhead], !script.isEmpty else { continue }
@@ -1095,6 +1310,43 @@ final class TimelineDocument {
 
     func stageObject(id: String) -> StageObject? {
         stageObjects.first { $0.id == id }
+    }
+
+    /// For every layer whose governing keyframe at the current `playhead`
+    /// is a named `SymbolInstance` not already spawned, creates a
+    /// `StageObject` from it — same as if a script had just called
+    /// `stage.addText` with that name. Runs once per frame, before that
+    /// frame's own scripts (see `runScriptsOnCurrentFrame`), so a frame-1
+    /// script can address an instance placed on frame 1 immediately, the
+    /// same way Flash's own instance creation happens before that frame's
+    /// actions run. `stageObject(id:) == nil` both guards against
+    /// re-spawning every frame while the span is current and means a
+    /// script's own `stage.addText` with a colliding name correctly no-ops
+    /// against an already-spawned instance, exactly like two `addText`
+    /// calls with the same id already do.
+    ///
+    /// Deliberately a one-time snapshot, not a live mirror: once spawned,
+    /// the instance is a plain, independent StageObject from then on —
+    /// further edits to the Library symbol or the Timeline placement don't
+    /// retroactively change it, matching how the object model treats
+    /// "authored" (Properties panel, always reflects current symbol
+    /// content) and "running" (script-controlled, frozen at spawn time)
+    /// as two different lifetimes.
+    private func spawnNamedInstances() {
+        for layer in layers {
+            guard layer.isKeyframe(at: playhead),
+                  let instance = layer.symbolFrames[playhead], !instance.name.isEmpty,
+                  stageObject(id: instance.name) == nil,
+                  let symbol = library.first(where: { $0.id == instance.symbolID })
+            else { continue }
+            stageObjects.append(StageObject(
+                id: instance.name, text: symbol.text,
+                x: instance.x + instance.width / 2, y: instance.y + instance.height / 2,
+                fontSize: symbol.fontSize, color: Color(hex: symbol.colorHex),
+                scale: instance.scale, rotation: Double(instance.rotation), opacity: instance.opacity,
+                fontName: symbol.fontName, bold: symbol.bold, italic: symbol.italic
+            ))
+        }
     }
 
     func addTextObject(id: String, text: String, x: Double, y: Double) {
@@ -1295,6 +1547,9 @@ final class TimelineDocument {
                 if layer.textFrames[frame] == nil, let snapshot = layer.interpolatedPlacedText(at: frame) {
                     layer.textFrames[frame] = snapshot
                 }
+                if layer.symbolFrames[frame] == nil, let snapshot = layer.interpolatedSymbolInstance(at: frame) {
+                    layer.symbolFrames[frame] = snapshot
+                }
             }
             layer.frames[idx] = blank ? .emptyKeyframe : .keyframe(hasScript: !(layer.frameScripts[frame] ?? "").isEmpty)
         }
@@ -1321,6 +1576,7 @@ final class TimelineDocument {
             }
             layer.frameScripts[frame] = nil
             layer.textFrames[frame] = nil
+            layer.symbolFrames[frame] = nil
             layer.tweenSettings[frame] = nil
             layer.colorTweenSettings[frame] = nil
             layer.frameLabels[frame] = nil

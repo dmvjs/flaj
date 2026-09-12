@@ -18,17 +18,19 @@ struct FlajDocumentFile: Codable {
     var webExportPageBackgroundOpacity: Double
     var webExportMinify: Bool
     var layers: [FlajLayerFile]
+    var library: [FlajSymbol]
 
     private enum CodingKeys: String, CodingKey {
         case version, totalFrames, fps, stageWidth, stageHeight, stageColorHex,
              webExportTitle, webExportFit, webExportAlignment,
-             webExportPageBackgroundHex, webExportPageBackgroundOpacity, webExportMinify, layers
+             webExportPageBackgroundHex, webExportPageBackgroundOpacity, webExportMinify, layers, library
     }
 
     init(version: Int = 1, totalFrames: Int, fps: Double, stageWidth: Double, stageHeight: Double,
          stageColorHex: String, webExportTitle: String = "", webExportFit: StageFit = .contain,
          webExportAlignment: StageAlignment = .center, webExportPageBackgroundHex: String = "#000000",
-         webExportPageBackgroundOpacity: Double = 0, webExportMinify: Bool = true, layers: [FlajLayerFile]) {
+         webExportPageBackgroundOpacity: Double = 0, webExportMinify: Bool = true, layers: [FlajLayerFile],
+         library: [FlajSymbol] = []) {
         self.version = version
         self.totalFrames = totalFrames
         self.fps = fps
@@ -42,9 +44,11 @@ struct FlajDocumentFile: Codable {
         self.webExportPageBackgroundOpacity = webExportPageBackgroundOpacity
         self.webExportMinify = webExportMinify
         self.layers = layers
+        self.library = library
     }
 
-    // Custom decode so .flaj files saved before the web-export options existed still open.
+    // Custom decode so .flaj files saved before the web-export options (or
+    // the Library) existed still open.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
@@ -60,6 +64,7 @@ struct FlajDocumentFile: Codable {
         webExportPageBackgroundOpacity = try c.decodeIfPresent(Double.self, forKey: .webExportPageBackgroundOpacity) ?? 0
         webExportMinify = try c.decodeIfPresent(Bool.self, forKey: .webExportMinify) ?? true
         layers = try c.decode([FlajLayerFile].self, forKey: .layers)
+        library = try c.decodeIfPresent([FlajSymbol].self, forKey: .library) ?? []
     }
 }
 
@@ -82,18 +87,20 @@ struct FlajLayerFile: Codable {
     var frames: [FrameMark]
     var frameScripts: [Int: String]
     var textFrames: [Int: PlacedText]
+    var symbolFrames: [Int: SymbolInstance]
     var tweenSettings: [Int: TweenSettings]
     var colorTweenSettings: [Int: TweenSettings]
     var frameLabels: [Int: String]
 
     private enum CodingKeys: String, CodingKey {
         case id, name, swatchHex, kind, indent, locked, hidden, expanded, frames, frameScripts, textFrames,
-             tweenSettings, colorTweenSettings, frameLabels
+             symbolFrames, tweenSettings, colorTweenSettings, frameLabels
     }
 
     init(id: UUID = UUID(), name: String, swatchHex: String, kind: LayerKind, indent: Int, locked: Bool, hidden: Bool,
          expanded: Bool, frames: [FrameMark], frameScripts: [Int: String], textFrames: [Int: PlacedText],
-         tweenSettings: [Int: TweenSettings], colorTweenSettings: [Int: TweenSettings], frameLabels: [Int: String] = [:]) {
+         symbolFrames: [Int: SymbolInstance] = [:], tweenSettings: [Int: TweenSettings],
+         colorTweenSettings: [Int: TweenSettings], frameLabels: [Int: String] = [:]) {
         self.id = id
         self.name = name
         self.swatchHex = swatchHex
@@ -105,13 +112,14 @@ struct FlajLayerFile: Codable {
         self.frames = frames
         self.frameScripts = frameScripts
         self.textFrames = textFrames
+        self.symbolFrames = symbolFrames
         self.tweenSettings = tweenSettings
         self.colorTweenSettings = colorTweenSettings
         self.frameLabels = frameLabels
     }
 
-    // Custom decode so .flaj files saved before id/textFrames/tweenSettings/
-    // colorTweenSettings/frameLabels existed still open.
+    // Custom decode so .flaj files saved before id/textFrames/symbolFrames/
+    // tweenSettings/colorTweenSettings/frameLabels existed still open.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
@@ -125,6 +133,7 @@ struct FlajLayerFile: Codable {
         frames = try c.decode([FrameMark].self, forKey: .frames)
         frameScripts = try c.decode([Int: String].self, forKey: .frameScripts)
         textFrames = try c.decodeIfPresent([Int: PlacedText].self, forKey: .textFrames) ?? [:]
+        symbolFrames = try c.decodeIfPresent([Int: SymbolInstance].self, forKey: .symbolFrames) ?? [:]
         tweenSettings = try c.decodeIfPresent([Int: TweenSettings].self, forKey: .tweenSettings) ?? [:]
         colorTweenSettings = try c.decodeIfPresent([Int: TweenSettings].self, forKey: .colorTweenSettings) ?? [:]
         frameLabels = try c.decodeIfPresent([Int: String].self, forKey: .frameLabels) ?? [:]
@@ -194,10 +203,12 @@ extension TimelineDocument {
                     id: layer.id, name: layer.name, swatchHex: layer.swatch.hexString, kind: layer.kind,
                     indent: layer.indent, locked: layer.locked, hidden: layer.hidden,
                     expanded: layer.expanded, frames: layer.frames, frameScripts: layer.frameScripts,
-                    textFrames: layer.textFrames, tweenSettings: layer.tweenSettings,
+                    textFrames: layer.textFrames, symbolFrames: layer.symbolFrames,
+                    tweenSettings: layer.tweenSettings,
                     colorTweenSettings: layer.colorTweenSettings, frameLabels: layer.frameLabels
                 )
-            }
+            },
+            library: library
         )
     }
 
@@ -220,6 +231,7 @@ extension TimelineDocument {
         webExportAlignment = file.webExportAlignment
         webExportPageBackground = Color(hex: file.webExportPageBackgroundHex).opacity(file.webExportPageBackgroundOpacity)
         webExportMinify = file.webExportMinify
+        library = file.library
         layers = file.layers.map { lf in
             let layer = TLLayer(
                 id: lf.id, name: lf.name, swatch: Color(hex: lf.swatchHex), kind: lf.kind, indent: lf.indent,
@@ -228,6 +240,7 @@ extension TimelineDocument {
             layer.expanded = lf.expanded
             layer.frameScripts = lf.frameScripts
             layer.textFrames = lf.textFrames
+            layer.symbolFrames = lf.symbolFrames
             layer.tweenSettings = lf.tweenSettings
             layer.colorTweenSettings = lf.colorTweenSettings
             layer.frameLabels = lf.frameLabels
@@ -240,6 +253,7 @@ extension TimelineDocument {
         selectedLayerID = layers.first?.id
         playhead = 1
         selectedFrame = 1
+        hasSelectedFrame = false
         consoleMessages.removeAll()
     }
 

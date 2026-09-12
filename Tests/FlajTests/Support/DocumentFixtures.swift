@@ -81,6 +81,49 @@ enum DocumentFixtures {
         return doc
     }
 
+    /// A single Library symbol with one placed instance (untweened) — the
+    /// minimal case for verifying export resolves `layer.symbolFrames` +
+    /// `doc.library` into the same rendered text a plain PlacedText box
+    /// would produce. Same stage/text geometry as `tweenedText()`'s first
+    /// keyframe so the two are easy to compare against each other.
+    static func symbolInstance() -> TimelineDocument {
+        let layer = TLLayer(name: "art", swatch: .green, frames: [.keyframe(hasScript: false)])
+        let symbol = FlajSymbol(name: "Label", text: "Flaj", fontName: "Helvetica", fontSize: 16, colorHex: "#000000")
+        layer.symbolFrames[1] = SymbolInstance(symbolID: symbol.id, x: 4, y: 4, width: 70, height: 20)
+
+        let doc = TimelineDocument(layers: [layer], totalFrames: 1)
+        doc.library = [symbol]
+        doc.stageWidth = 110
+        doc.stageHeight = 32
+        doc.stageColor = .white
+        doc.fps = 8
+        return doc
+    }
+
+    /// Two symbol-instance keyframes tweened left-to-right — mirrors
+    /// `tweenedText()` but through the Library/instance path, proving the
+    /// export handles a tweened symbol span, not just a static one.
+    static func tweenedSymbolInstance() -> TimelineDocument {
+        let totalFrames = 10
+        var frames = [FrameMark](repeating: .tween, count: totalFrames)
+        frames[0] = .keyframe(hasScript: false)
+        frames[totalFrames - 1] = .keyframe(hasScript: false)
+
+        let layer = TLLayer(name: "art", swatch: .green, frames: frames)
+        let symbol = FlajSymbol(name: "Label", text: "Flaj", fontName: "Helvetica", fontSize: 16, colorHex: "#000000")
+        layer.symbolFrames[1] = SymbolInstance(symbolID: symbol.id, x: 4, y: 4, width: 70, height: 20)
+        layer.symbolFrames[totalFrames] = SymbolInstance(symbolID: symbol.id, x: 40, y: 4, width: 70, height: 20)
+        layer.tweenSettings[1] = TweenSettings(family: .linear)
+
+        let doc = TimelineDocument(layers: [layer], totalFrames: totalFrames)
+        doc.library = [symbol]
+        doc.stageWidth = 110
+        doc.stageHeight = 32
+        doc.stageColor = .white
+        doc.fps = 8
+        return doc
+    }
+
     /// Touches every field `FlajDocumentFile`/`FlajLayerFile` persist —
     /// two layers (one a locked/hidden folder), frame scripts, placed text,
     /// and tween settings — so a save/open round-trip test exercises the
@@ -107,7 +150,15 @@ enum DocumentFixtures {
         art.colorTweenSettings = [1: TweenSettings(family: .sine, direction: .easeIn, amount: 80)]
         art.frameLabels = [1: "start"]
 
-        let doc = TimelineDocument(layers: [actions, art], totalFrames: 3)
+        let props = TLLayer(name: "props", swatch: .purple, indent: 0, frames: [.keyframe(hasScript: false), .empty, .empty])
+        let symbol = FlajSymbol(
+            name: "Badge", text: "NEW", fontName: "Helvetica", fontSize: 18,
+            bold: true, italic: false, colorHex: "#FF3366", alignment: .center
+        )
+        props.symbolFrames = [1: SymbolInstance(symbolID: symbol.id, x: 50, y: 60, width: 40, height: 18, opacity: 0.9, scale: 1.2, rotation: 15, name: "badge1")]
+
+        let doc = TimelineDocument(layers: [actions, art, props], totalFrames: 3)
+        doc.library = [symbol]
         doc.stageWidth = 320
         doc.stageHeight = 180
         doc.stageColor = .init(red: 0.1, green: 0.2, blue: 0.3)

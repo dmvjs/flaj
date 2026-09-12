@@ -2,7 +2,13 @@ import SwiftUI
 import Observation
 
 /// A text object on the Stage — created/controlled from frame scripts via
-/// the `stage.addText`/`setText`/`setTransform`/`tween` JS globals.
+/// the `stage.addText`/`setText`/`setTransform`/`tween` JS globals. Also
+/// what a named `SymbolInstance` becomes the moment its governing keyframe
+/// is reached during playback (see `TimelineDocument.spawnNamedInstances`)
+/// — one object model, one API, whether a script created it or the
+/// Timeline placed it. `fontName`/`bold`/`italic` default to match exactly
+/// what `stage.addText` already produced before those fields existed, so
+/// existing script-created objects are unaffected.
 @Observable
 final class StageObject: Identifiable {
     let id: String
@@ -14,9 +20,13 @@ final class StageObject: Identifiable {
     var scale: CGFloat
     var rotation: Double // degrees
     var opacity: Double
+    var fontName: String
+    var bold: Bool
+    var italic: Bool
 
     init(id: String, text: String, x: CGFloat, y: CGFloat, fontSize: CGFloat = 24,
-         color: Color = .black, scale: CGFloat = 1, rotation: Double = 0, opacity: Double = 1) {
+         color: Color = .black, scale: CGFloat = 1, rotation: Double = 0, opacity: Double = 1,
+         fontName: String = "Helvetica", bold: Bool = false, italic: Bool = false) {
         self.id = id
         self.text = text
         self.x = x
@@ -26,6 +36,9 @@ final class StageObject: Identifiable {
         self.scale = scale
         self.rotation = rotation
         self.opacity = opacity
+        self.fontName = fontName
+        self.bold = bold
+        self.italic = italic
     }
 }
 
@@ -99,6 +112,95 @@ struct PlacedText: Codable, Equatable {
         opacity = try c.decodeIfPresent(Double.self, forKey: .opacity) ?? 1
         scale = try c.decodeIfPresent(CGFloat.self, forKey: .scale) ?? 1
         rotation = try c.decodeIfPresent(CGFloat.self, forKey: .rotation) ?? 0
+    }
+}
+
+/// A reusable Library entry — Flash's Symbol concept, scoped down to a
+/// single frame: no nested timeline of its own, just the text/font/style
+/// content shared by every `SymbolInstance` placed from it. Editing a
+/// symbol's content here updates every instance at once; each instance
+/// still gets its own independent position/size/scale/rotation/opacity
+/// (and can still be tweened across keyframes, exactly like `PlacedText`).
+struct FlajSymbol: Codable, Equatable, Identifiable {
+    let id: UUID
+    var name: String
+    var text: String
+    var fontName: String
+    var fontSize: CGFloat
+    var bold: Bool
+    var italic: Bool
+    var colorHex: String
+    var alignment: TextHAlign
+
+    init(id: UUID = UUID(), name: String, text: String = "Text", fontName: String = "Helvetica",
+         fontSize: CGFloat = 24, bold: Bool = false, italic: Bool = false, colorHex: String = "#000000",
+         alignment: TextHAlign = .leading) {
+        self.id = id
+        self.name = name
+        self.text = text
+        self.fontName = fontName
+        self.fontSize = fontSize
+        self.bold = bold
+        self.italic = italic
+        self.colorHex = colorHex
+        self.alignment = alignment
+    }
+}
+
+/// One placement of a `FlajSymbol` on the Stage — tied to a specific
+/// (layer, keyframe), same as `PlacedText`. Carries only the geometry a
+/// single instance needs independently of the symbol's shared content:
+/// where it sits, how big its box is, and its own scale/rotation/opacity.
+/// `x`/`y` are the box's top-left corner in Stage pixel space, matching
+/// `PlacedText`.
+struct SymbolInstance: Codable, Equatable {
+    var symbolID: UUID
+    var x: CGFloat
+    var y: CGFloat
+    var width: CGFloat = 160
+    var height: CGFloat = 40
+    var opacity: Double = 1
+    var scale: CGFloat = 1
+    var rotation: CGFloat = 0
+    // Flash's "instance name" — empty means unnamed/unaddressable (the
+    // default; matches how an empty frame label means "no label", see
+    // TLLayer.frameLabels). Once non-empty, the moment this instance's
+    // governing keyframe is reached during playback it spawns into
+    // `TimelineDocument.stageObjects` under this name (see
+    // `spawnNamedInstances`) and becomes addressable from frame scripts via
+    // the exact same stage.setTransform/tween/setText a script-created
+    // object already uses — no separate API for Timeline-placed vs.
+    // script-created objects.
+    var name: String = ""
+
+    init(symbolID: UUID, x: CGFloat, y: CGFloat, width: CGFloat = 160, height: CGFloat = 40,
+         opacity: Double = 1, scale: CGFloat = 1, rotation: CGFloat = 0, name: String = "") {
+        self.symbolID = symbolID
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.opacity = opacity
+        self.scale = scale
+        self.rotation = rotation
+        self.name = name
+    }
+
+    private enum CodingKeys: String, CodingKey { case symbolID, x, y, width, height, opacity, scale, rotation, name }
+
+    // Custom decode so .flaj files saved before `name` (or the earlier
+    // width/height/opacity/scale/rotation) existed still open.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        symbolID = try c.decode(UUID.self, forKey: .symbolID)
+        x = try c.decode(CGFloat.self, forKey: .x)
+        y = try c.decode(CGFloat.self, forKey: .y)
+        width = try c.decodeIfPresent(CGFloat.self, forKey: .width) ?? 160
+        height = try c.decodeIfPresent(CGFloat.self, forKey: .height) ?? 40
+        opacity = try c.decodeIfPresent(Double.self, forKey: .opacity) ?? 1
+        scale = try c.decodeIfPresent(CGFloat.self, forKey: .scale) ?? 1
+        rotation = try c.decodeIfPresent(CGFloat.self, forKey: .rotation) ?? 0
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
     }
 }
 

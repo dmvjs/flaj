@@ -150,11 +150,6 @@
     return cssLinearEasing(t => easedProgress(settings, t));
   }
 
-  function cssEasingForSimple(name) {
-    const fn = SIMPLE_EASING[name] || SIMPLE_EASING.linear;
-    return name === 'linear' ? 'linear' : cssLinearEasing(fn);
-  }
-
   // ---- placed text: real Web Animations per tween span ----
   // (mirrors TLLayer.interpolatedPlacedText, but the interpolation itself
   // happens natively — this only computes the two keyframes' endpoints.)
@@ -184,6 +179,33 @@
     el.style.justifyContent = align.justifyContent;
   }
 
+  // ---- symbol instances (mirrors TLLayer.interpolatedSymbolInstance) ----
+  // A Library symbol (doc.library) holds the shared text/font/style
+  // content; a placed instance (layer.symbolFrames[kf]) holds only its own
+  // geometry. This normalizes either kind of keyframe content — plain
+  // placed text, or a resolved symbol instance — into one PlacedText-
+  // shaped object, so every function below it (applyStaticTextStyle,
+  // boxKeyframe, colorKeyframe, createLayerVisual) can stay agnostic to
+  // which kind actually governs a given span.
+
+  function findSymbol(symbolID) {
+    return (doc.library || []).find(s => s.id === symbolID) || null;
+  }
+
+  function resolvePlacement(layer, kf) {
+    if (layer.textFrames[kf]) return layer.textFrames[kf];
+    const instance = layer.symbolFrames && layer.symbolFrames[kf];
+    if (!instance) return null;
+    const symbol = findSymbol(instance.symbolID);
+    if (!symbol) return null; // orphaned reference — render nothing rather than throw
+    return {
+      text: symbol.text, fontName: symbol.fontName, fontSize: symbol.fontSize,
+      bold: symbol.bold, italic: symbol.italic, colorHex: symbol.colorHex, alignment: symbol.alignment,
+      x: instance.x, y: instance.y, width: instance.width, height: instance.height,
+      opacity: instance.opacity, scale: instance.scale, rotation: instance.rotation
+    };
+  }
+
   function boxKeyframe(placement, spinDeg) {
     const scale = placement.scale ?? 1;
     const rotation = (placement.rotation ?? 0) + spinDeg;
@@ -208,14 +230,14 @@
   /// Animations API is for), not one animation forced to share a curve
   /// across unrelated properties.
   function createLayerVisual(layer, kf) {
-    const base = layer.textFrames[kf];
+    const base = resolvePlacement(layer, kf);
     const el = document.createElement('div');
     el.className = 'flaj-text';
     applyStaticTextStyle(el, base);
     textLayerEl.appendChild(el);
 
     const endKf = tweenTarget(layer.frames, kf);
-    const end = endKf != null ? layer.textFrames[endKf] : null;
+    const end = endKf != null ? resolvePlacement(layer, endKf) : null;
     const animations = [];
     if (endKf != null && end && endKf > kf) {
       const durationMs = ((endKf - kf) / fps) * 1000;
@@ -251,7 +273,14 @@
     const kf = governingKeyframe(layer.frames, Math.floor(frame));
     const existing = layerVisuals.get(layerIndex);
 
-    if (kf == null || layer.hidden || !layer.textFrames[kf]) {
+    // A named instance already spawned into `stageObjects` (see
+    // spawnNamedInstances) is rendered by renderStageObjects instead —
+    // it's now a live, script-controlled object, not Timeline-authored
+    // content, mirroring StageView's identical suppression in the native app.
+    const instance = kf != null && layer.symbolFrames && layer.symbolFrames[kf];
+    const spawned = instance && instance.name && stageObjects.has(instance.name);
+
+    if (kf == null || layer.hidden || !resolvePlacement(layer, kf) || spawned) {
       if (existing) { existing.animations.forEach(a => a.cancel()); existing.element.remove(); layerVisuals.delete(layerIndex); }
       return;
     }
@@ -292,6 +321,9 @@
     div.style.left = obj.x + 'px';
     div.style.top = obj.y + 'px';
     div.style.fontSize = obj.fontSize + 'px';
+    div.style.fontFamily = (obj.fontName || 'Helvetica') + ', sans-serif';
+    div.style.fontWeight = obj.bold ? 'bold' : 'normal';
+    div.style.fontStyle = obj.italic ? 'italic' : 'normal';
     div.style.color = obj.color;
     div.style.opacity = String(obj.opacity);
     div.style.transform = `translate(-50%, -50%) scale(${obj.scale}) rotate(${obj.rotation}deg)`;
@@ -302,6 +334,31 @@
     objectsLayerEl.replaceChildren();
     for (const obj of stageObjects.values()) {
       objectsLayerEl.appendChild(makeStageObjectNode(obj));
+    }
+  }
+
+  const stageObjectDefaults = { fontSize: 24, color: '#000000', scale: 1, rotation: 0, opacity: 1, fontName: 'Helvetica', bold: false, italic: false };
+
+  // For every layer whose governing keyframe at `playhead` is a named
+  // symbol instance not already spawned, creates a stage object from it —
+  // same as a script calling stage.addText with that name (mirrors
+  // TimelineDocument.spawnNamedInstances; keep both in lockstep). Runs
+  // once per frame, before that frame's own scripts, so a frame-1 script
+  // can address an instance placed on frame 1 immediately.
+  function spawnNamedInstances() {
+    for (const layer of doc.layers) {
+      if (!isKeyframe(layer.frames, playhead)) continue;
+      const instance = layer.symbolFrames && layer.symbolFrames[playhead];
+      if (!instance || !instance.name || stageObjects.has(instance.name)) continue;
+      const symbol = findSymbol(instance.symbolID);
+      if (!symbol) continue;
+      stageObjects.set(instance.name, {
+        ...stageObjectDefaults,
+        text: symbol.text, x: instance.x + instance.width / 2, y: instance.y + instance.height / 2,
+        fontSize: symbol.fontSize, color: symbol.colorHex, scale: instance.scale,
+        rotation: instance.rotation, opacity: instance.opacity,
+        fontName: symbol.fontName, bold: symbol.bold, italic: symbol.italic
+      });
     }
   }
 
@@ -338,6 +395,7 @@
 
   function runScriptsOnCurrentFrame() {
     updateNamedAnchor();
+    spawnNamedInstances();
     for (const layer of doc.layers) {
       if (!isKeyframe(layer.frames, playhead)) continue;
       const script = layer.frameScripts[playhead];
@@ -364,11 +422,33 @@
   // in effect across frames without needing to be re-set each time —
   // checked after every script run regardless of whether *that* frame's
   // script touched it.
+  //
+  // A mouse-only onclick would make the whole-frame link unreachable by
+  // keyboard — real banner placements get tabbed to and activated with
+  // Enter/Space just like any other link, so this also gives #flaj-frame a
+  // link role, a tab stop, and a matching keydown handler while active.
   function updateClickTag() {
     const url = stage.clickTag;
     const active = typeof url === 'string' && url.length > 0;
+    const open = () => window.open(url, '_blank');
     frameEl.style.cursor = active ? 'pointer' : '';
-    frameEl.onclick = active ? () => window.open(url, '_blank') : null;
+    frameEl.onclick = active ? open : null;
+    if (active) {
+      frameEl.setAttribute('role', 'link');
+      frameEl.setAttribute('aria-label', 'Open ' + url);
+      frameEl.tabIndex = 0;
+      frameEl.onkeydown = (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          open();
+        }
+      };
+    } else {
+      frameEl.removeAttribute('role');
+      frameEl.removeAttribute('aria-label');
+      frameEl.removeAttribute('tabindex');
+      frameEl.onkeydown = null;
+    }
   }
 
   function clamp(frame, lo, hi) { return Math.min(Math.max(frame, lo), hi); }
@@ -492,8 +572,6 @@
   const bg = {
     color(value) { stageColor = value; stageEl.style.backgroundColor = stageColor; }
   };
-
-  const stageObjectDefaults = { fontSize: 24, color: '#000000', scale: 1, rotation: 0, opacity: 1 };
 
   function startTween(id, property, to, frames, easingName) {
     const obj = stageObjects.get(id);

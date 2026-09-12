@@ -9,6 +9,30 @@ import XCTest
 @MainActor
 final class TimelineModelTests: XCTestCase {
 
+    func testFreshDocumentHasNoSelectedFrameUntilAClick() {
+        // selectedFrame itself still defaults to 1 (F5/F6-type actions need
+        // a sane frame to act on before any click) — hasSelectedFrame is
+        // what the frame grid actually gates its highlight on, so a brand
+        // new document doesn't look like frame 1 is already selected.
+        let doc = TimelineDocument.sample()
+        XCTAssertFalse(doc.hasSelectedFrame)
+
+        let layer = doc.layers[0]
+        doc.selectFrame(layer: layer, frame: 1, extend: false)
+        XCTAssertTrue(doc.hasSelectedFrame)
+    }
+
+    func testOpeningADocumentClearsAnyPriorFrameSelection() throws {
+        let doc = DocumentFixtures.blackWhiteFlip()
+        doc.selectFrame(layer: doc.layers[0], frame: 1, extend: false)
+        XCTAssertTrue(doc.hasSelectedFrame)
+
+        let file = try JSONDecoder().decode(FlajDocumentFile.self, from: JSONEncoder().encode(doc.makeSaveFile()))
+        doc.load(from: file)
+
+        XCTAssertFalse(doc.hasSelectedFrame)
+    }
+
     func testSelectFrameSelectsPlacedTextOnAKeyframeThatHasIt() {
         let layer = TLLayer(name: "text", swatch: .green, frames: [.keyframe(hasScript: false), .empty])
         layer.textFrames[1] = PlacedText(text: "Hi", x: 0, y: 0, width: 20, height: 10)

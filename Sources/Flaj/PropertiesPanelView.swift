@@ -13,6 +13,11 @@ struct PropertiesPanelView: View {
     // state rather than anything written into PlacedText/the .flaj format.
     @State private var positionAnchor: NineAnchor = .topLeading
 
+    // The name typed for the next "Convert to Symbol" — plain UI state,
+    // not part of the document, same spirit as positionAnchor. Cleared
+    // after each conversion.
+    @State private var newSymbolName: String = ""
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
@@ -22,8 +27,10 @@ struct PropertiesPanelView: View {
             // clears the stage selection (see selectFrame), so whichever is
             // still set here is whatever was picked most recently.
             let textBinding = doc.selectedPlacement.flatMap { doc.binding(for: $0) }
-            let tweenBinding = textBinding == nil ? doc.activeTweenRef.flatMap { doc.tweenBinding(for: $0) } : nil
-            let colorTweenBinding = textBinding == nil ? doc.activeTweenRef.flatMap { doc.colorTweenBinding(for: $0) } : nil
+            let instanceBinding = textBinding == nil ? doc.selectedSymbolPlacement.flatMap { doc.binding(for: $0) } : nil
+            let noStageSelection = textBinding == nil && instanceBinding == nil
+            let tweenBinding = noStageSelection ? doc.activeTweenRef.flatMap { doc.tweenBinding(for: $0) } : nil
+            let colorTweenBinding = noStageSelection ? doc.activeTweenRef.flatMap { doc.colorTweenBinding(for: $0) } : nil
             // Independent of text/tween selection, not a third mutually
             // exclusive case — a keyframe that also starts a tween (or
             // carries placed text) can still carry its own label, so this
@@ -47,15 +54,22 @@ struct PropertiesPanelView: View {
                     }
                     if let binding = textBinding {
                         textSection(binding)
+                        convertToSymbolRow(binding)
                         positionSection(binding)
                         characterSection(binding)
                         alignSection(binding)
+                    } else if let instanceBinding {
+                        instanceSection(instanceBinding)
+                        if let symbolBinding = doc.symbolBinding(instanceBinding.wrappedValue.symbolID) {
+                            symbolContentSection(symbolBinding)
+                        }
                     } else if let tweenBinding, let colorTweenBinding {
                         tweenSection(tweenBinding)
                         colorTweenSection(colorTweenBinding)
                     } else {
                         documentTitleRow
                         documentSection
+                        librarySection
                         webExportSection
                         HStack(spacing: 8) {
                             Button("Export GIF…") { doc.exportGIF() }
@@ -169,6 +183,47 @@ struct PropertiesPanelView: View {
         }
     }
 
+    /// The Library — Flash's panel of reusable Symbol definitions, scoped
+    /// down to live here rather than as its own panel (see FlajSymbol in
+    /// StageObject.swift for what a v0 symbol actually holds). "Place"
+    /// drops a new instance on the currently selected layer/frame; renaming
+    /// or deleting here affects every instance, since they all just
+    /// reference this same symbol by id.
+    private var librarySection: some View {
+        sectionLabel("Library") {
+            VStack(alignment: .leading, spacing: 4) {
+                if doc.library.isEmpty {
+                    Text("No symbols yet — select a text box and Convert to Symbol.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(doc.library) { symbol in
+                    HStack(spacing: 6) {
+                        TextField("Name", text: symbolNameBinding(symbol.id))
+                            .textFieldStyle(.roundedBorder)
+                            .controlSize(.small)
+                        Button("Place") { doc.placeSymbolInstance(symbol) }
+                            .controlSize(.small)
+                        Button {
+                            doc.deleteSymbol(symbol.id)
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    private func symbolNameBinding(_ symbolID: UUID) -> Binding<String> {
+        Binding(
+            get: { doc.library.first(where: { $0.id == symbolID })?.name ?? "" },
+            set: { doc.renameSymbol(symbolID, to: $0) }
+        )
+    }
+
     // MARK: - Sections
 
     private func textSection(_ binding: Binding<PlacedText>) -> some View {
@@ -178,6 +233,121 @@ struct PropertiesPanelView: View {
                 .frame(height: 40)
                 .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.3)))
         }
+    }
+
+    /// Wraps this text box's content into a new Library symbol and swaps
+    /// the Stage placement for an instance of it — see
+    /// `TimelineDocument.convertSelectedTextToSymbol`. The name field
+    /// defaults to the box's own text if left blank, so a one-click
+    /// convert without typing a name still gets something sensible in
+    /// the Library list.
+    private func convertToSymbolRow(_ binding: Binding<PlacedText>) -> some View {
+        HStack(spacing: 6) {
+            TextField("Symbol name", text: $newSymbolName)
+                .textFieldStyle(.roundedBorder)
+                .controlSize(.small)
+            Button("Convert to Symbol") {
+                let name = newSymbolName.isEmpty ? binding.wrappedValue.text : newSymbolName
+                doc.convertSelectedTextToSymbol(name: name)
+                newSymbolName = ""
+            }
+            .controlSize(.small)
+        }
+    }
+
+    /// A placed symbol instance's own transform — position/size/scale/
+    /// rotation/opacity, the same vocabulary `positionSection` edits for
+    /// text, minus the registration-anchor picker (kept simple for v0:
+    /// x/y always the box's top-left, same as storage).
+    private func instanceSection(_ binding: Binding<SymbolInstance>) -> some View {
+        let fieldLabelWidth: CGFloat = 32
+        return sectionLabel("Instance") {
+            VStack(spacing: 4) {
+                HStack(spacing: 6) {
+                    Text("Name").font(.system(size: 10)).foregroundStyle(.secondary)
+                        .frame(width: fieldLabelWidth, alignment: .leading)
+                    TextField("Unnamed", text: binding.name)
+                        .textFieldStyle(.roundedBorder)
+                        .controlSize(.small)
+                }
+                HStack(spacing: 6) {
+                    numberField("X", binding.x, labelWidth: fieldLabelWidth)
+                    numberField("Y", binding.y, labelWidth: fieldLabelWidth)
+                }
+                HStack(spacing: 6) {
+                    numberField("W", binding.width, labelWidth: fieldLabelWidth)
+                    numberField("H", binding.height, labelWidth: fieldLabelWidth)
+                }
+                HStack(spacing: 6) {
+                    numberField("Scale", binding.scale, labelWidth: fieldLabelWidth)
+                    numberField("Rotate", binding.rotation, labelWidth: fieldLabelWidth)
+                }
+                HStack(spacing: 6) {
+                    // "Opacity" doesn't fit fieldLabelWidth (32pt, sized for
+                    // "X"/"Scale"/"Rotate") without wrapping — this row gets
+                    // its own wider label, same idiom as easingControls'
+                    // "Amount" slider row.
+                    Text("Opacity").font(.system(size: 10)).foregroundStyle(.secondary)
+                        .frame(width: 44, alignment: .leading)
+                    Slider(value: binding.opacity, in: 0...1).controlSize(.small)
+                    Text("\(Int((binding.wrappedValue.opacity * 100).rounded()))%")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 30, alignment: .trailing)
+                }
+            }
+        }
+    }
+
+    /// The selected instance's underlying symbol content — editing this
+    /// updates every other instance of the same symbol too, since they all
+    /// reference it by id rather than owning their own copy.
+    private func symbolContentSection(_ binding: Binding<FlajSymbol>) -> some View {
+        sectionLabel("Symbol: \(binding.wrappedValue.name)") {
+            VStack(alignment: .leading, spacing: 4) {
+                TextEditor(text: binding.text)
+                    .font(.system(size: 11))
+                    .frame(height: 32)
+                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.3)))
+                Picker("", selection: binding.fontName) {
+                    ForEach(Self.fontFamilies, id: \.self) { family in
+                        Text(family).tag(family)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .controlSize(.small)
+                HStack(spacing: 6) {
+                    numberField("Size", binding.fontSize, labelWidth: 28)
+                    Toggle("B", isOn: binding.bold).toggleStyle(.button).font(.system(size: 11, weight: .bold)).controlSize(.small)
+                    Toggle("I", isOn: binding.italic).toggleStyle(.button).font(.system(size: 11).italic()).controlSize(.small)
+                }
+                HStack(spacing: 6) {
+                    Text("Color").font(.system(size: 11)).foregroundStyle(.secondary)
+                    ColorPicker("", selection: symbolColorBinding(binding)).labelsHidden()
+                    Picker("", selection: binding.alignment) {
+                        Image(systemName: "text.alignleft").tag(TextHAlign.leading)
+                        Image(systemName: "text.aligncenter").tag(TextHAlign.center)
+                        Image(systemName: "text.alignright").tag(TextHAlign.trailing)
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .controlSize(.small)
+                    .frame(width: 90)
+                    Spacer()
+                }
+                Text("Edits every instance of this symbol.")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func symbolColorBinding(_ binding: Binding<FlajSymbol>) -> Binding<Color> {
+        Binding(
+            get: { Color(hex: binding.wrappedValue.colorHex) },
+            set: { binding.wrappedValue.colorHex = $0.hexString }
+        )
     }
 
     /// Position, size, scale and rotation together — all spatial, all

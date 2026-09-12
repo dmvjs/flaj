@@ -56,6 +56,101 @@ final class WebExportTests: XCTestCase {
         XCTAssertEqual(end as? String, "40px")
     }
 
+    /// A symbol instance (Library symbol + placed instance, no tween) must
+    /// render the exact same text/position player.js already produces for
+    /// a plain PlacedText box — proves `resolvePlacement` in player.js
+    /// correctly resolves `layer.symbolFrames`/`doc.library` into that same
+    /// rendering path, not just the Swift side.
+    func testSymbolInstanceRendersTheLibraryContentAtItsOwnPosition() async throws {
+        let doc = DocumentFixtures.symbolInstance()
+        let url = exportedURL(doc)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let harness = WebViewHarness()
+        try await harness.load(fileURL: url)
+
+        let text = try await harness.evaluate("document.querySelector('.flaj-text').textContent")
+        XCTAssertEqual(text as? String, "Flaj")
+        let left = try await harness.evaluate("getComputedStyle(document.querySelector('.flaj-text')).left")
+        XCTAssertEqual(left as? String, "4px")
+    }
+
+    /// Same as `testTweenedTextReachesBothEndpoints`, but through the
+    /// Library/instance path (DocumentFixtures.tweenedSymbolInstance) —
+    /// proves a tweened symbol span becomes a real Web Animation too, not
+    /// just a static instance.
+    func testTweenedSymbolInstanceReachesBothEndpoints() async throws {
+        let doc = DocumentFixtures.tweenedSymbolInstance()
+        let url = exportedURL(doc)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let harness = WebViewHarness()
+        try await harness.load(fileURL: url)
+
+        try await harness.evaluate("gotoAndStop(1)")
+        let start = try await harness.evaluate("getComputedStyle(document.querySelector('.flaj-text')).left")
+        XCTAssertEqual(start as? String, "4px")
+
+        try await harness.evaluate("gotoAndStop(10)")
+        let end = try await harness.evaluate("getComputedStyle(document.querySelector('.flaj-text')).left")
+        XCTAssertEqual(end as? String, "40px")
+    }
+
+    /// A named symbol instance spawns into the same `stageObjects` a
+    /// script-created `stage.addText` object lives in, and becomes movable
+    /// through the exact same `stage.setTransform` — no separate API for
+    /// Timeline-placed vs. script-created objects (mirrors
+    /// SymbolTests.testFrameScriptCanMoveANamedInstanceThroughTheExistingStageAPI
+    /// on the Swift side).
+    func testNamedSymbolInstanceIsMovableThroughStageSetTransform() async throws {
+        let layer = TLLayer(name: "art", swatch: .green, frames: [.keyframe(hasScript: true)])
+        let symbol = FlajSymbol(name: "Badge", text: "HELLO")
+        layer.symbolFrames[1] = SymbolInstance(symbolID: symbol.id, x: 0, y: 0, width: 40, height: 10, name: "badge1")
+        layer.frameScripts[1] = "stage.setTransform('badge1', { x: 200, y: 150 });"
+        let doc = TimelineDocument(layers: [layer], totalFrames: 1)
+        doc.library = [symbol]
+        doc.stageWidth = 400
+        doc.stageHeight = 300
+
+        let url = exportedURL(doc)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let harness = WebViewHarness()
+        try await harness.load(fileURL: url)
+
+        // Spawned/script-controlled objects render via .flaj-object (the
+        // stageObjects layer), not .flaj-text (the Timeline-authored layer)
+        // — confirms the authored rendering was suppressed too, not just
+        // that the object moved.
+        let authoredCount = try await harness.evaluate("document.querySelectorAll('.flaj-text').length")
+        XCTAssertEqual((authoredCount as? NSNumber)?.intValue, 0)
+
+        let left = try await harness.evaluate("document.querySelector('.flaj-object').style.left")
+        XCTAssertEqual(left as? String, "200px")
+        let top = try await harness.evaluate("document.querySelector('.flaj-object').style.top")
+        XCTAssertEqual(top as? String, "150px")
+    }
+
+    /// A symbol instance whose `symbolID` doesn't resolve against
+    /// `doc.library` (shouldn't happen via the app's own UI — `deleteSymbol`
+    /// purges every instance — but the export must not crash on a
+    /// hand-edited or otherwise corrupted .flaj file) should just render
+    /// nothing at that keyframe rather than throwing.
+    func testOrphanedSymbolInstanceRendersNothingInsteadOfCrashing() async throws {
+        let layer = TLLayer(name: "art", swatch: .green, frames: [.keyframe(hasScript: false)])
+        layer.symbolFrames[1] = SymbolInstance(symbolID: UUID(), x: 0, y: 0)
+        let doc = TimelineDocument(layers: [layer], totalFrames: 1)
+        doc.stageWidth = 40
+        doc.stageHeight = 40
+        let url = exportedURL(doc)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let harness = WebViewHarness()
+        try await harness.load(fileURL: url)
+
+        let count = try await harness.evaluate("document.querySelectorAll('.flaj-text').length")
+        XCTAssertEqual((count as? NSNumber)?.intValue, 0)
+    }
+
     /// Scale/rotation tween in the exported page — `getComputedStyle`'s
     /// `transform` comes back as a matrix, not a literal "scale(...)
     /// rotate(...)" string, so this decomposes it back into scale/degrees

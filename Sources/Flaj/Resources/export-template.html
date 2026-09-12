@@ -1,5 +1,5 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -67,19 +67,31 @@
     align-items: flex-start;
     white-space: pre-wrap;
     line-height: 1.2;
+    /* Every span here is a rotate/scale/move Web Animation candidate (see
+       player.js) — promoting to its own compositor layer up front keeps a
+       rotate from re-rasterizing text every frame (which reads as blur/
+       jitter on a spinning box), the same way it would if left to the
+       browser to notice mid-animation. */
+    will-change: transform;
   }
   .flaj-object {
     position: absolute;
     white-space: pre;
     font-family: -apple-system, system-ui, sans-serif;
+    will-change: transform;
   }
 </style>
 </head>
 <body>
 <div id="flaj-frame">
   <div id="flaj-stage">
-    <div id="flaj-text-layer"></div>
+    <!-- Script/stage-created objects paint behind Timeline-placed text —
+         mirrors StageContentView's ZStack order in the native app, which
+         draws doc.stageObjects before its placed-text layers. Swapping
+         these two divs would put stage objects on top instead, the one
+         place these two renderers could visibly disagree. -->
     <div id="flaj-objects-layer"></div>
+    <div id="flaj-text-layer"></div>
   </div>
 </div>
 <script id="flaj-document" type="application/json">__FLAJ_DOCUMENT_JSON__</script>
