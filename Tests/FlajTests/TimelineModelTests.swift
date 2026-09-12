@@ -173,6 +173,23 @@ final class TimelineModelTests: XCTestCase {
         XCTAssertEqual(mid?.rotation ?? -1, 90, accuracy: 0.0001)
     }
 
+    /// Drop Shadow/Glow are static per span, same category as bold/italic/
+    /// fontName (see `PlacedText.dropShadow`'s own doc comment) — carried
+    /// through from the start keyframe for the whole span rather than
+    /// eased or swapped partway through, even when the end keyframe sets a
+    /// completely different filter (or none at all).
+    func testFiltersStayFixedAtTheStartKeyframesValueAcrossATweenSpan() {
+        let frames: [FrameMark] = [.keyframe(hasScript: false), .tween, .keyframe(hasScript: false)]
+        let layer = TLLayer(name: "text", swatch: .green, frames: frames)
+        layer.textFrames[1] = PlacedText(x: 0, y: 0, dropShadow: DropShadowFilter(colorHex: "#000000", blur: 4, offsetX: 2, offsetY: 2, opacity: 0.5))
+        layer.textFrames[3] = PlacedText(x: 0, y: 0, glow: GlowFilter(colorHex: "#FFFFFF", blur: 8, opacity: 0.8)) // no dropShadow at all
+        layer.tweenSettings[1] = TweenSettings(family: .linear)
+
+        let mid = layer.interpolatedPlacedText(at: 2)
+        XCTAssertEqual(mid?.dropShadow, DropShadowFilter(colorHex: "#000000", blur: 4, offsetX: 2, offsetY: 2, opacity: 0.5), "should still be the start keyframe's shadow, not eased toward nil")
+        XCTAssertNil(mid?.glow, "the end keyframe's glow shouldn't appear before the span actually reaches it")
+    }
+
     func testMoveKeyframeCarriesItsContentToTheNewFrame() {
         let layer = TLLayer(
             name: "actions", swatch: .yellow,

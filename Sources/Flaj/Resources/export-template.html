@@ -50,7 +50,7 @@
     overflow: hidden;
     transform-origin: top left;
   }
-  #flaj-text-layer, #flaj-objects-layer {
+  #flaj-text-layer, #flaj-objects-layer, #flaj-shapes-layer {
     position: absolute;
     inset: 0;
   }
@@ -80,6 +80,17 @@
     font-family: -apple-system, system-ui, sans-serif;
     will-change: transform;
   }
+  /* box-sizing: border-box keeps the rendered footprint exactly the W/H a
+     shape was drawn/typed at — matching what the Properties panel's W/H
+     fields say — rather than growing by the border width the way
+     content-box would (SwiftUI's own centered-stroke rendering doesn't map
+     to either CSS border model exactly; border-box was chosen since it
+     keeps position/size numbers predictable, not for pixel-identical
+     stroke centering). */
+  .flaj-shape {
+    position: absolute;
+    box-sizing: border-box;
+  }
 </style>
 </head>
 <body>
@@ -89,8 +100,15 @@
          mirrors StageContentView's ZStack order in the native app, which
          draws doc.stageObjects before its placed-text layers. Swapping
          these two divs would put stage objects on top instead, the one
-         place these two renderers could visibly disagree. -->
+         place these two renderers could visibly disagree. Shapes get their
+         own layer between the two: behind text (typical usage — a shape as
+         backdrop, text on top, same as Flash's own convention of drawing
+         graphics beneath a layer stack's text), ahead of stage objects. Not
+         a stand-in for real per-TLLayer z-ordering (out of scope for v1,
+         same as shapes not being tweenable yet — see PlacedShape's own doc
+         comment), just a predictable default for the common case. -->
     <div id="flaj-objects-layer"></div>
+    <div id="flaj-shapes-layer"></div>
     <div id="flaj-text-layer"></div>
   </div>
 </div>

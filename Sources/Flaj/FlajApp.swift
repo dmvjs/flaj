@@ -91,6 +91,12 @@ struct FlajApp: App {
                 Button("Remove Frames") { doc.clearFrameAtSelection() }
                     .keyboardShortcut(.f5, modifiers: [.shift])
             }
+            CommandMenu("View") {
+                Toggle("Rulers", isOn: $doc.rulersVisible)
+                    .keyboardShortcut("r", modifiers: [.command, .option, .shift])
+                Toggle("Show Guides", isOn: $doc.guidesVisible)
+                    .keyboardShortcut(";", modifiers: .command)
+            }
         }
     }
 }

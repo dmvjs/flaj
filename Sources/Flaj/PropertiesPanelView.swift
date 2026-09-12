@@ -1,9 +1,14 @@
 import SwiftUI
 import AppKit
 
-/// Flash's Properties panel, scoped to what a placed text box actually
-/// needs: position/size, character (font/size/style/color), paragraph
-/// alignment, and a 9-position quick-align grid against the Stage.
+/// Flash's Properties panel, scoped to what a placed text box or symbol
+/// instance actually needs: position/size, character (font/size/style/
+/// color), Filters (Drop Shadow/Glow), paragraph alignment, and a
+/// 9-position quick-align grid against the Stage. A symbol instance's own
+/// content reuses these same content sections (`textSection`/
+/// `characterSection`/`filtersSection`) rather than a parallel copy —
+/// editing a symbol's text/character/filters is meant to feel identical to
+/// editing a plain text box's, because it's the exact same view code.
 struct PropertiesPanelView: View {
     let doc: TimelineDocument
 
@@ -28,7 +33,8 @@ struct PropertiesPanelView: View {
             // still set here is whatever was picked most recently.
             let textBinding = doc.selectedPlacement.flatMap { doc.binding(for: $0) }
             let instanceBinding = textBinding == nil ? doc.selectedSymbolPlacement.flatMap { doc.binding(for: $0) } : nil
-            let noStageSelection = textBinding == nil && instanceBinding == nil
+            let shapeBinding = (textBinding == nil && instanceBinding == nil) ? doc.selectedShapePlacement.flatMap { doc.binding(for: $0) } : nil
+            let noStageSelection = textBinding == nil && instanceBinding == nil && shapeBinding == nil
             let tweenBinding = noStageSelection ? doc.activeTweenRef.flatMap { doc.tweenBinding(for: $0) } : nil
             let colorTweenBinding = noStageSelection ? doc.activeTweenRef.flatMap { doc.colorTweenBinding(for: $0) } : nil
             // Independent of text/tween selection, not a third mutually
@@ -57,12 +63,22 @@ struct PropertiesPanelView: View {
                         convertToSymbolRow(binding)
                         positionSection(binding)
                         characterSection(binding)
+                        filtersSection(binding)
                         alignSection(binding)
                     } else if let instanceBinding {
                         instanceSection(instanceBinding)
-                        if let symbolBinding = doc.symbolBinding(instanceBinding.wrappedValue.symbolID) {
-                            symbolContentSection(symbolBinding)
+                        let symbolID = instanceBinding.wrappedValue.symbolID
+                        if let contentBinding = doc.symbolContentBinding(symbolID) {
+                            let symbolName = doc.library.first(where: { $0.id == symbolID })?.name ?? ""
+                            symbolContentHeader(symbolName)
+                            textSection(contentBinding)
+                            characterSection(contentBinding)
+                            filtersSection(contentBinding)
                         }
+                    } else if let shapeBinding {
+                        shapePositionSection(shapeBinding)
+                        shapeFillStrokeSection(shapeBinding)
+                        shapeAlignSection(shapeBinding)
                     } else if let tweenBinding, let colorTweenBinding {
                         tweenSection(tweenBinding)
                         colorTweenSection(colorTweenBinding)
@@ -128,7 +144,7 @@ struct PropertiesPanelView: View {
                     numberField("H", doc.undoableBinding(\.stageHeight, coalesce: "stageHeight"))
                 }
                 HStack(spacing: 6) {
-                    Text("FPS").font(.system(size: 10)).foregroundStyle(.secondary).frame(width: 30, alignment: .leading)
+                    Text("FPS").font(.system(size: 10)).foregroundStyle(.secondary).frame(width: Self.fieldLabelWidth, alignment: .leading)
                     TextField("", value: doc.undoableBinding(\.fps, coalesce: "fps"), formatter: Self.fpsFormatter)
                         .textFieldStyle(.roundedBorder)
                         .controlSize(.small)
@@ -136,7 +152,7 @@ struct PropertiesPanelView: View {
                 }
                 HStack(spacing: 6) {
                     Text("Stage Color").font(.system(size: 11)).foregroundStyle(.secondary)
-                    ColorPicker("", selection: doc.undoableBinding(\.stageColor, coalesce: "stageColor")).labelsHidden()
+                    NativeColorWell(color: doc.undoableBinding(\.stageColor, coalesce: "stageColor"))
                     Spacer()
                 }
             }
@@ -168,11 +184,13 @@ struct PropertiesPanelView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 6) {
                             Text("Page BG").font(.system(size: 11)).foregroundStyle(.secondary)
-                            ColorPicker(
-                                "", selection: doc.undoableBinding(\.webExportPageBackground, coalesce: "webExportPageBackground"),
-                                supportsOpacity: true
-                            )
-                            .labelsHidden()
+                            NativeColorWell(color: doc.webExportPageBackgroundHexBinding)
+                            Slider(value: doc.webExportPageBackgroundOpacityBinding, in: 0...1)
+                                .controlSize(.small)
+                            Text("\(Int((doc.webExportPageBackground.opacityComponent * 100).rounded()))%")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 28, alignment: .trailing)
                         }
                         Toggle("Minify JS", isOn: doc.undoableBinding(\.webExportMinify))
                             .toggleStyle(.checkbox)
@@ -260,27 +278,48 @@ struct PropertiesPanelView: View {
     /// text, minus the registration-anchor picker (kept simple for v0:
     /// x/y always the box's top-left, same as storage).
     private func instanceSection(_ binding: Binding<SymbolInstance>) -> some View {
-        let fieldLabelWidth: CGFloat = 32
-        return sectionLabel("Instance") {
+        sectionLabel("Instance") {
             VStack(spacing: 4) {
                 HStack(spacing: 6) {
                     Text("Name").font(.system(size: 10)).foregroundStyle(.secondary)
-                        .frame(width: fieldLabelWidth, alignment: .leading)
+                        .frame(width: Self.fieldLabelWidth, alignment: .leading)
                     TextField("Unnamed", text: binding.name)
                         .textFieldStyle(.roundedBorder)
                         .controlSize(.small)
                 }
-                HStack(spacing: 6) {
-                    numberField("X", binding.x, labelWidth: fieldLabelWidth)
-                    numberField("Y", binding.y, labelWidth: fieldLabelWidth)
+                // Swap Symbol — repoints this one instance at a different
+                // Library symbol (TimelineDocument.swapSymbol), keeping
+                // everything else about it (position/size/scale/rotation/
+                // opacity/name) exactly as it is. Only shown once there's a
+                // second symbol to swap to.
+                if let ref = doc.selectedSymbolPlacement, doc.library.count > 1 {
+                    HStack(spacing: 6) {
+                        Text("Symbol").font(.system(size: 10)).foregroundStyle(.secondary)
+                            .frame(width: Self.fieldLabelWidth, alignment: .leading)
+                        Picker("", selection: Binding(
+                            get: { binding.wrappedValue.symbolID },
+                            set: { doc.swapSymbol(at: ref, to: $0) }
+                        )) {
+                            ForEach(doc.library) { symbol in
+                                Text(symbol.name).tag(symbol.id)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .controlSize(.small)
+                    }
                 }
                 HStack(spacing: 6) {
-                    numberField("W", binding.width, labelWidth: fieldLabelWidth)
-                    numberField("H", binding.height, labelWidth: fieldLabelWidth)
+                    numberField("X", binding.x)
+                    numberField("Y", binding.y)
                 }
                 HStack(spacing: 6) {
-                    numberField("Scale", binding.scale, labelWidth: fieldLabelWidth)
-                    numberField("Rotate", binding.rotation, labelWidth: fieldLabelWidth)
+                    numberField("W", binding.width)
+                    numberField("H", binding.height)
+                }
+                HStack(spacing: 6) {
+                    numberField("Scale", binding.scale)
+                    numberField("Rotate", binding.rotation)
                 }
                 HStack(spacing: 6) {
                     // "Opacity" doesn't fit fieldLabelWidth (32pt, sized for
@@ -299,81 +338,44 @@ struct PropertiesPanelView: View {
         }
     }
 
-    /// The selected instance's underlying symbol content — editing this
-    /// updates every other instance of the same symbol too, since they all
-    /// reference it by id rather than owning their own copy.
-    private func symbolContentSection(_ binding: Binding<FlajSymbol>) -> some View {
-        sectionLabel("Symbol: \(binding.wrappedValue.name)") {
-            VStack(alignment: .leading, spacing: 4) {
-                TextEditor(text: binding.text)
-                    .font(.system(size: 11))
-                    .frame(height: 32)
-                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.3)))
-                Picker("", selection: binding.fontName) {
-                    ForEach(Self.fontFamilies, id: \.self) { family in
-                        Text(family).tag(family)
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .controlSize(.small)
-                HStack(spacing: 6) {
-                    numberField("Size", binding.fontSize, labelWidth: 28)
-                    Toggle("B", isOn: binding.bold).toggleStyle(.button).font(.system(size: 11, weight: .bold)).controlSize(.small)
-                    Toggle("I", isOn: binding.italic).toggleStyle(.button).font(.system(size: 11).italic()).controlSize(.small)
-                }
-                HStack(spacing: 6) {
-                    Text("Color").font(.system(size: 11)).foregroundStyle(.secondary)
-                    ColorPicker("", selection: symbolColorBinding(binding)).labelsHidden()
-                    Picker("", selection: binding.alignment) {
-                        Image(systemName: "text.alignleft").tag(TextHAlign.leading)
-                        Image(systemName: "text.aligncenter").tag(TextHAlign.center)
-                        Image(systemName: "text.alignright").tag(TextHAlign.trailing)
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
-                    .controlSize(.small)
-                    .frame(width: 90)
-                    Spacer()
-                }
-                Text("Edits every instance of this symbol.")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
-            }
+    /// A one-line preface before the selected instance's underlying symbol
+    /// content — everything actually editable about that content is
+    /// `textSection`/`characterSection`/`filtersSection` below this,
+    /// reused verbatim rather than a second, slightly-different copy of
+    /// each (a prior version of this file had exactly that: its own
+    /// TextEditor, its own font/size/color/align row, missing Filters
+    /// entirely — three near-duplicates of the same fields is exactly the
+    /// kind of drift that made this panel hard to trust). Editing any of
+    /// them updates every instance of the symbol at once, since they all
+    /// reference this same content by id rather than owning their own copy.
+    private func symbolContentHeader(_ symbolName: String) -> some View {
+        sectionLabel("Symbol: \(symbolName)") {
+            Text("Edits every instance of this symbol.")
+                .font(.system(size: 9))
+                .foregroundStyle(.secondary)
         }
-    }
-
-    private func symbolColorBinding(_ binding: Binding<FlajSymbol>) -> Binding<Color> {
-        Binding(
-            get: { Color(hex: binding.wrappedValue.colorHex) },
-            set: { binding.wrappedValue.colorHex = $0.hexString }
-        )
     }
 
     /// Position, size, scale and rotation together — all spatial, all
     /// tween start-to-end alongside each other (see
     /// TLLayer.interpolatedPlacedText), not split across separate sections
-    /// the way an earlier version of this panel had them. One consistent
-    /// `labelWidth` across every row (wide enough for "Rotate", the
-    /// longest) so the fields line up as a real grid instead of each row
-    /// finding its own width.
+    /// the way an earlier version of this panel had them.
     private func positionSection(_ binding: Binding<PlacedText>) -> some View {
-        let fieldLabelWidth: CGFloat = 32
-        return sectionLabel("Position, Size & Transform") {
+        sectionLabel("Position, Size & Transform") {
             HStack(alignment: .top, spacing: 8) {
                 positionAnchorGrid
                 VStack(spacing: 4) {
                     HStack(spacing: 6) {
-                        numberField("X", anchoredXBinding(binding), labelWidth: fieldLabelWidth)
-                        numberField("Y", anchoredYBinding(binding), labelWidth: fieldLabelWidth)
+                        numberField("X", anchoredXBinding(binding))
+                        numberField("Y", anchoredYBinding(binding))
                     }
                     HStack(spacing: 6) {
-                        numberField("W", binding.width, labelWidth: fieldLabelWidth)
-                        numberField("H", binding.height, labelWidth: fieldLabelWidth)
+                        numberField("W", binding.width)
+                        numberField("H", binding.height)
                     }
                     HStack(spacing: 6) {
-                        numberField("Scale", binding.scale, labelWidth: fieldLabelWidth)
-                        numberField("Rotate", binding.rotation, labelWidth: fieldLabelWidth)
+                        numberField("Scale", binding.scale)
+                        numberField("Rotate", binding.rotation)
                     }
                 }
             }
@@ -383,15 +385,25 @@ struct PropertiesPanelView: View {
     /// Which point of the box X/Y refers to — top-left (Flash/this app's
     /// storage default) through center to bottom-right, or anywhere between.
     private var positionAnchorGrid: some View {
+        nineAnchorGrid(isSelected: { $0 == positionAnchor }) { positionAnchor = $0 }
+    }
+
+    /// A 3x3 grid of small dot buttons, one per `NineAnchor` point — shared
+    /// by `positionAnchorGrid` (a persistent choice: which point X/Y refer
+    /// to, so the current one stays highlighted) and `alignSection` (a
+    /// one-shot snap action, nothing is ever "selected" — `isSelected`
+    /// defaults to always-false) — one grid, one dot style, instead of two
+    /// near-identical copies that could quietly drift apart.
+    private func nineAnchorGrid(isSelected: @escaping (NineAnchor) -> Bool = { _ in false }, onTap: @escaping (NineAnchor) -> Void) -> some View {
         LazyVGrid(columns: Array(repeating: GridItem(.fixed(16), spacing: 2), count: 3), spacing: 2) {
             ForEach(NineAnchor.allCases, id: \.self) { anchor in
-                Button(action: { positionAnchor = anchor }) {
+                Button(action: { onTap(anchor) }) {
                     Circle()
-                        .fill(positionAnchor == anchor ? Color.accentColor : Color.secondary.opacity(0.5))
+                        .fill(isSelected(anchor) ? Color.accentColor : Color.secondary.opacity(0.5))
                         .frame(width: 5, height: 5)
                         .frame(width: 16, height: 16)
                         .background(
-                            positionAnchor == anchor ? Color.accentColor.opacity(0.15) : Color.secondary.opacity(0.08),
+                            isSelected(anchor) ? Color.accentColor.opacity(0.15) : Color.secondary.opacity(0.08),
                             in: RoundedRectangle(cornerRadius: 2)
                         )
                 }
@@ -437,14 +449,21 @@ struct PropertiesPanelView: View {
                 .controlSize(.small)
 
                 HStack(spacing: 6) {
-                    numberField("Size", binding.fontSize, labelWidth: 28)
+                    numberField("Size", binding.fontSize)
                     Toggle("B", isOn: binding.bold).toggleStyle(.button).font(.system(size: 11, weight: .bold)).controlSize(.small)
                     Toggle("I", isOn: binding.italic).toggleStyle(.button).font(.system(size: 11).italic()).controlSize(.small)
                 }
 
                 HStack(spacing: 6) {
                     Text("Color").font(.system(size: 11)).foregroundStyle(.secondary)
-                    ColorPicker("", selection: colorBinding(binding), supportsOpacity: true).labelsHidden()
+                    NativeColorWell(color: colorBinding(binding))
+                    Slider(value: binding.opacity, in: 0...1).controlSize(.small)
+                    Text("\(Int((binding.wrappedValue.opacity * 100).rounded()))%")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, alignment: .trailing)
+                }
+                HStack(spacing: 6) {
                     Picker("", selection: binding.alignment) {
                         Image(systemName: "text.alignleft").tag(TextHAlign.leading)
                         Image(systemName: "text.aligncenter").tag(TextHAlign.center)
@@ -460,27 +479,194 @@ struct PropertiesPanelView: View {
         }
     }
 
+    /// Flash 8's Filters panel, scoped to Drop Shadow and Glow (see
+    /// `PlacedText`'s own doc comment on why just these two — the others
+    /// need a vector-rendering engine this app doesn't have yet). Each is
+    /// an on/off Toggle that reveals its own controls once enabled, same
+    /// idiom System Settings uses for an optional feature's sub-options.
+    private func filtersSection(_ binding: Binding<PlacedText>) -> some View {
+        sectionLabel("Filters") {
+            VStack(alignment: .leading, spacing: 8) {
+                filterToggle("Drop Shadow", isOn: Binding(
+                    get: { binding.wrappedValue.dropShadow != nil },
+                    set: { binding.wrappedValue.dropShadow = $0 ? (binding.wrappedValue.dropShadow ?? DropShadowFilter()) : nil }
+                )) {
+                    let shadow = Binding(
+                        get: { binding.wrappedValue.dropShadow ?? DropShadowFilter() },
+                        set: { binding.wrappedValue.dropShadow = $0 }
+                    )
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 6) {
+                            NativeColorWell(color: filterColorBinding(shadow))
+                            Slider(value: shadow.opacity, in: 0...1).controlSize(.small)
+                            Text("\(Int((shadow.wrappedValue.opacity * 100).rounded()))%")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 28, alignment: .trailing)
+                        }
+                        HStack(spacing: 6) {
+                            numberField("Blur", shadow.blur)
+                            numberField("X", shadow.offsetX)
+                            numberField("Y", shadow.offsetY)
+                        }
+                    }
+                }
+                filterToggle("Glow", isOn: Binding(
+                    get: { binding.wrappedValue.glow != nil },
+                    set: { binding.wrappedValue.glow = $0 ? (binding.wrappedValue.glow ?? GlowFilter()) : nil }
+                )) {
+                    let glow = Binding(
+                        get: { binding.wrappedValue.glow ?? GlowFilter() },
+                        set: { binding.wrappedValue.glow = $0 }
+                    )
+                    HStack(spacing: 6) {
+                        NativeColorWell(color: filterColorBinding(glow))
+                        Slider(value: glow.opacity, in: 0...1).controlSize(.small)
+                        Text("\(Int((glow.wrappedValue.opacity * 100).rounded()))%")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 28, alignment: .trailing)
+                        numberField("Blur", glow.blur)
+                    }
+                }
+            }
+        }
+    }
+
+    /// A checkbox with its own revealed controls indented beneath it while
+    /// on — shared shape for Drop Shadow and Glow above, each of which
+    /// otherwise differs only in which fields it exposes.
+    private func filterToggle<Content: View>(
+        _ title: String, isOn: Binding<Bool>, @ViewBuilder controls: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle(title, isOn: isOn).toggleStyle(.checkbox).font(.system(size: 11))
+            if isOn.wrappedValue {
+                controls().padding(.leading, 18)
+            }
+        }
+    }
+
+    /// Hex-only, same idiom as `colorBinding(_:)` above generalized to
+    /// `DropShadowFilter`/`GlowFilter` via `ColorFilter` — `binding.opacity`
+    /// is shown/edited via its own Slider alongside `NativeColorWell`.
+    private func filterColorBinding<F: ColorFilter>(_ binding: Binding<F>) -> Binding<Color> {
+        Binding(
+            get: { Color(hex: binding.wrappedValue.colorHex) },
+            set: { binding.wrappedValue.colorHex = $0.hexString }
+        )
+    }
+
     /// A one-off snap action, not a value you'd check back on — lowest
     /// priority of the sections here, so it sits last.
     private func alignSection(_ binding: Binding<PlacedText>) -> some View {
         sectionLabel("Align to Stage") {
-            let anchors: [(CGFloat, CGFloat)] = [
-                (0, 0), (0.5, 0), (1, 0),
-                (0, 0.5), (0.5, 0.5), (1, 0.5),
-                (0, 1), (0.5, 1), (1, 1)
-            ]
-            // Same compact size as positionAnchorGrid above — no reason
-            // this one's targets should be 2.25x the area for the same
-            // kind of 9-point picker.
-            LazyVGrid(columns: Array(repeating: GridItem(.fixed(16), spacing: 2), count: 3), spacing: 2) {
-                ForEach(anchors.indices, id: \.self) { i in
-                    Button(action: { applyAnchor(anchors[i], binding) }) {
-                        Circle().fill(Color.secondary.opacity(0.5)).frame(width: 5, height: 5)
-                            .frame(width: 16, height: 16)
-                            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 2))
+            nineAnchorGrid { anchor in
+                binding.wrappedValue.x = anchor.fraction.x * (doc.stageWidth - binding.wrappedValue.width)
+                binding.wrappedValue.y = anchor.fraction.y * (doc.stageHeight - binding.wrappedValue.height)
+            }
+        }
+    }
+
+    /// A drawn shape's position and size — same anchor-grid idiom as
+    /// `positionSection` for text, minus scale/rotation (shapes aren't
+    /// tweenable in v1, see `PlacedShape`'s own doc comment, so there's no
+    /// transform curve for those to animate along).
+    private func shapePositionSection(_ binding: Binding<PlacedShape>) -> some View {
+        sectionLabel("Position & Size") {
+            HStack(alignment: .top, spacing: 8) {
+                positionAnchorGrid
+                VStack(spacing: 4) {
+                    HStack(spacing: 6) {
+                        numberField("X", anchoredShapeXBinding(binding))
+                        numberField("Y", anchoredShapeYBinding(binding))
                     }
-                    .buttonStyle(.plain)
+                    HStack(spacing: 6) {
+                        numberField("W", binding.width)
+                        numberField("H", binding.height)
+                    }
                 }
+            }
+        }
+    }
+
+    private func anchoredShapeXBinding(_ binding: Binding<PlacedShape>) -> Binding<CGFloat> {
+        Binding(
+            get: { binding.wrappedValue.x + binding.wrappedValue.width * positionAnchor.fraction.x },
+            set: { binding.wrappedValue.x = $0 - binding.wrappedValue.width * positionAnchor.fraction.x }
+        )
+    }
+
+    private func anchoredShapeYBinding(_ binding: Binding<PlacedShape>) -> Binding<CGFloat> {
+        Binding(
+            get: { binding.wrappedValue.y + binding.wrappedValue.height * positionAnchor.fraction.y },
+            set: { binding.wrappedValue.y = $0 - binding.wrappedValue.height * positionAnchor.fraction.y }
+        )
+    }
+
+    /// Fill and stroke color+opacity plus stroke width and overall opacity —
+    /// same color+opacity-in-one-swatch idiom as `characterSection`'s text
+    /// color and `filtersSection`'s filter colors (`colorBinding`/
+    /// `filterColorBinding`), just for the two colors a shape carries.
+    private func shapeFillStrokeSection(_ binding: Binding<PlacedShape>) -> some View {
+        sectionLabel("Shape") {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Text("Fill").font(.system(size: 11)).foregroundStyle(.secondary).frame(width: Self.fieldLabelWidth, alignment: .leading)
+                    NativeColorWell(color: shapeFillBinding(binding))
+                    Slider(value: binding.fillOpacity, in: 0...1).controlSize(.small)
+                    Text("\(Int((binding.wrappedValue.fillOpacity * 100).rounded()))%")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, alignment: .trailing)
+                }
+                HStack(spacing: 6) {
+                    Text("Stroke").font(.system(size: 11)).foregroundStyle(.secondary).frame(width: Self.fieldLabelWidth, alignment: .leading)
+                    NativeColorWell(color: shapeStrokeBinding(binding))
+                    Slider(value: binding.strokeOpacity, in: 0...1).controlSize(.small)
+                    Text("\(Int((binding.wrappedValue.strokeOpacity * 100).rounded()))%")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, alignment: .trailing)
+                }
+                HStack(spacing: 6) {
+                    Spacer().frame(width: Self.fieldLabelWidth)
+                    numberField("Width", binding.strokeWidth)
+                    Spacer()
+                }
+                HStack(spacing: 6) {
+                    Text("Opacity").font(.system(size: 10)).foregroundStyle(.secondary).frame(width: 44, alignment: .leading)
+                    Slider(value: binding.opacity, in: 0...1).controlSize(.small)
+                    Text("\(Int((binding.wrappedValue.opacity * 100).rounded()))%")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 30, alignment: .trailing)
+                }
+            }
+        }
+    }
+
+    /// Hex-only — `fillOpacity` is its own Slider next to `NativeColorWell`.
+    private func shapeFillBinding(_ binding: Binding<PlacedShape>) -> Binding<Color> {
+        Binding(
+            get: { Color(hex: binding.wrappedValue.fillColorHex) },
+            set: { binding.wrappedValue.fillColorHex = $0.hexString }
+        )
+    }
+
+    /// Hex-only — `strokeOpacity` is its own Slider next to `NativeColorWell`.
+    private func shapeStrokeBinding(_ binding: Binding<PlacedShape>) -> Binding<Color> {
+        Binding(
+            get: { Color(hex: binding.wrappedValue.strokeColorHex) },
+            set: { binding.wrappedValue.strokeColorHex = $0.hexString }
+        )
+    }
+
+    private func shapeAlignSection(_ binding: Binding<PlacedShape>) -> some View {
+        sectionLabel("Align to Stage") {
+            nineAnchorGrid { anchor in
+                binding.wrappedValue.x = anchor.fraction.x * (doc.stageWidth - binding.wrappedValue.width)
+                binding.wrappedValue.y = anchor.fraction.y * (doc.stageHeight - binding.wrappedValue.height)
             }
         }
     }
@@ -552,11 +738,6 @@ struct PropertiesPanelView: View {
         }
     }
 
-    private func applyAnchor(_ anchor: (CGFloat, CGFloat), _ binding: Binding<PlacedText>) {
-        binding.wrappedValue.x = anchor.0 * (doc.stageWidth - binding.wrappedValue.width)
-        binding.wrappedValue.y = anchor.1 * (doc.stageHeight - binding.wrappedValue.height)
-    }
-
     // MARK: - Helpers
 
     private func sectionLabel<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
@@ -568,12 +749,16 @@ struct PropertiesPanelView: View {
         }
     }
 
-    /// `labelWidth` defaults to fit a single letter (X/Y/W/H) — pass a wider
-    /// value for a longer label (e.g. "Scale"/"Rotate" in transformSection)
-    /// so it doesn't wrap letter-by-letter in that fixed-width column.
-    private func numberField(_ label: String, _ value: Binding<CGFloat>, labelWidth: CGFloat = 12) -> some View {
+    /// One fixed column width for every field label in the whole panel —
+    /// "Rotate"/"Symbol", the longest labels anywhere here, are what it's
+    /// sized for. Every section using the same width, always, rather than
+    /// each picking its own, is what makes every row across every section
+    /// line up as one real grid instead of a collection of ad hoc rows.
+    private static let fieldLabelWidth: CGFloat = 32
+
+    private func numberField(_ label: String, _ value: Binding<CGFloat>) -> some View {
         HStack(spacing: 3) {
-            Text(label).font(.system(size: 10)).foregroundStyle(.secondary).frame(width: labelWidth, alignment: .leading)
+            Text(label).font(.system(size: 10)).foregroundStyle(.secondary).frame(width: Self.fieldLabelWidth, alignment: .leading)
             TextField("", value: value, formatter: Self.numberFormatter)
                 .textFieldStyle(.roundedBorder)
                 .controlSize(.small)
@@ -581,13 +766,13 @@ struct PropertiesPanelView: View {
         }
     }
 
+    /// Hex-only — `binding.opacity` is shown/edited via its own Slider
+    /// alongside `NativeColorWell`, not round-tripped through this Color
+    /// (see `NativeColorWell`'s own doc comment on why).
     private func colorBinding(_ binding: Binding<PlacedText>) -> Binding<Color> {
         Binding(
-            get: { Color(hex: binding.wrappedValue.colorHex).opacity(binding.wrappedValue.opacity) },
-            set: { newColor in
-                binding.wrappedValue.colorHex = newColor.hexString
-                binding.wrappedValue.opacity = newColor.opacityComponent
-            }
+            get: { Color(hex: binding.wrappedValue.colorHex) },
+            set: { binding.wrappedValue.colorHex = $0.hexString }
         )
     }
 

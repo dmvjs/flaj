@@ -69,10 +69,14 @@ final class TLLayer: Identifiable {
     var textFrames: [Int: PlacedText] = [:] // 1-based keyframe number -> placed text
     // Instances of a Library symbol (see FlajSymbol/SymbolInstance in
     // StageObject.swift) placed on this layer — same one-per-keyframe shape
-    // as textFrames, and a given keyframe carries at most one of the two
-    // (a layer's content is either authored text or a symbol instance,
-    // never both at once).
+    // as textFrames, and a given keyframe carries at most one of text/
+    // symbol instance/shape (a layer's content is exactly one of the
+    // three, never more than one at once).
     var symbolFrames: [Int: SymbolInstance] = [:]
+    // A vector-drawing-tool placement (see PlacedShape in StageObject.swift)
+    // — same one-per-keyframe shape and mutual exclusivity as textFrames/
+    // symbolFrames above.
+    var shapeFrames: [Int: PlacedShape] = [:]
     // Named keyframes — a navigation target for gotoAndPlay("name")/
     // gotoAndStop("name")/goto("name") from a frame script, matching
     // Flash's own frame labels. Purely a keyframe annotation, same
@@ -226,8 +230,58 @@ final class TLLayer: Identifiable {
 @MainActor
 @Observable
 final class TimelineDocument {
-    var layers: [TLLayer]
-    var totalFrames: Int
+    // The document's own top-level Timeline — always what `layers`/
+    // `totalFrames` mean at the root, regardless of `editingPath`. Renamed
+    // (from the plain `layers`/`totalFrames` every other type in this file
+    // still expects to just read/write "whichever Timeline is on screen")
+    // so Persistence.swift's real file save/open can reach the *document's*
+    // own Timeline explicitly, never whatever symbol edit-in-place happens
+    // to have open at the moment — see `layers`/`totalFrames` below. Not
+    // `private`: Swift's `private` is file-scoped, and Persistence.swift's
+    // `extension TimelineDocument` needs direct access to these two, not
+    // the redirecting computed properties.
+    var rootLayers: [TLLayer]
+    var rootTotalFrames: Int
+
+    // Edit-in-place: which symbol's Timeline `layers`/`totalFrames` below
+    // currently mean, outermost to innermost — empty means the document's
+    // own root Timeline (the ordinary, only-ever-true-until-now case).
+    // Purely a navigation/UI-mode stack, not an undoable edit in its own
+    // right (see Undo.swift's UndoEntry.editingPath) — Cmd+Z inside a
+    // symbol undoes edits made there, it doesn't back out of edit-in-place;
+    // Escape/the breadcrumb's back button do that instead.
+    var editingPath: [UUID] = []
+
+    /// Whichever Timeline `editingPath` currently points at — the
+    /// document's own root layers when empty, or the innermost symbol's
+    /// own `layers` when editing in place. Every existing reader/writer of
+    /// "the" Timeline (Stage rendering, the frame grid, addLayer/
+    /// insertKeyframe/etc., undo's own snapshot round-trip) already just
+    /// says `layers`, so redirecting it here is what makes edit-in-place
+    /// work everywhere at once instead of needing every one of those call
+    /// sites taught about symbols individually.
+    var layers: [TLLayer] {
+        get {
+            guard let id = editingPath.last, let idx = library.firstIndex(where: { $0.id == id }) else { return rootLayers }
+            return library[idx].layers
+        }
+        set {
+            guard let id = editingPath.last, let idx = library.firstIndex(where: { $0.id == id }) else { rootLayers = newValue; return }
+            library[idx].layers = newValue
+        }
+    }
+
+    var totalFrames: Int {
+        get {
+            guard let id = editingPath.last, let idx = library.firstIndex(where: { $0.id == id }) else { return rootTotalFrames }
+            return library[idx].totalFrames
+        }
+        set {
+            guard let id = editingPath.last, let idx = library.firstIndex(where: { $0.id == id }) else { rootTotalFrames = newValue; return }
+            library[idx].totalFrames = newValue
+        }
+    }
+
     var playhead: Int = 1
 
     // Grounded in reality: below 1fps the playback math degenerates and
@@ -293,6 +347,7 @@ final class TimelineDocument {
         if extend && selectedLayerID == layer.id {
             selectedPlacement = nil
             selectedSymbolPlacement = nil
+            selectedShapePlacement = nil
             rangeSelectionEnd = frame
         } else {
             selectedLayerID = layer.id
@@ -301,12 +356,19 @@ final class TimelineDocument {
             if layer.textFrames[frame] != nil {
                 selectedPlacement = TextPlacementRef(layerID: layer.id, keyframe: frame)
                 selectedSymbolPlacement = nil
+                selectedShapePlacement = nil
             } else if layer.symbolFrames[frame] != nil {
                 selectedSymbolPlacement = SymbolPlacementRef(layerID: layer.id, keyframe: frame)
                 selectedPlacement = nil
+                selectedShapePlacement = nil
+            } else if layer.shapeFrames[frame] != nil {
+                selectedShapePlacement = ShapePlacementRef(layerID: layer.id, keyframe: frame)
+                selectedPlacement = nil
+                selectedSymbolPlacement = nil
             } else {
                 selectedPlacement = nil
                 selectedSymbolPlacement = nil
+                selectedShapePlacement = nil
             }
         }
     }
@@ -329,6 +391,40 @@ final class TimelineDocument {
     // through a `.contain` letterbox, or behind a transparent Stage.
     // Defaults transparent so the export blends into whatever page embeds it.
     var webExportPageBackground: Color = .clear
+
+    /// `webExportPageBackground` split into its own hex-only (always
+    /// opaque) and opacity bindings — `NativeColorWell` only ever picks an
+    /// opaque color (see its own doc comment on why), so a color that
+    /// itself carries opacity needs its two components exposed as
+    /// separate view-facing bindings, both reading/writing the one
+    /// underlying `Color` property rather than the property becoming two
+    /// separate stored fields at the model level. Shared by
+    /// `PropertiesPanelView.webExportSection` and `WebExportSettingsSheet`
+    /// so both stay in sync without duplicating this split.
+    var webExportPageBackgroundHexBinding: Binding<Color> {
+        Binding(
+            get: { Color(hex: self.webExportPageBackground.hexString) },
+            set: { newColor in
+                let opacity = self.webExportPageBackground.opacityComponent
+                self.withUndoSnapshot(coalesce: "webExportPageBackground") {
+                    self.webExportPageBackground = newColor.opacity(opacity)
+                }
+            }
+        )
+    }
+
+    var webExportPageBackgroundOpacityBinding: Binding<Double> {
+        Binding(
+            get: { self.webExportPageBackground.opacityComponent },
+            set: { newOpacity in
+                let hex = self.webExportPageBackground.hexString
+                self.withUndoSnapshot(coalesce: "webExportPageBackground") {
+                    self.webExportPageBackground = Color(hex: hex).opacity(newOpacity)
+                }
+            }
+        )
+    }
+
     var webExportMinify: Bool = true
     // Drives the settings sheet shown before the save panel — see
     // `exportWebPage()`/`WebExportSettingsSheet` in WebExport.swift.
@@ -377,7 +473,7 @@ final class TimelineDocument {
 
     // MARK: - Text tool
 
-    enum StageTool { case selection, text }
+    enum StageTool { case selection, text, rectangle, ellipse }
     struct TextPlacementRef: Equatable {
         let layerID: UUID; let keyframe: Int
         /// Undo-coalescing key (see `withUndoSnapshot`) — edits to the same
@@ -441,8 +537,10 @@ final class TimelineDocument {
             )
             layer.symbolFrames[kf] = instance
             layer.textFrames[kf] = nil
+            layer.shapeFrames[kf] = nil
             selectedPlacement = nil
             selectedSymbolPlacement = SymbolPlacementRef(layerID: layer.id, keyframe: kf)
+            selectedShapePlacement = nil
         }
     }
 
@@ -465,6 +563,26 @@ final class TimelineDocument {
                 self.withUndoSnapshot(coalesce: ref.undoToken) { layer.symbolFrames[ref.keyframe] = newValue }
             }
         )
+    }
+
+    /// Swap Symbol — repoints one placed instance at a different Library
+    /// symbol, keeping everything else about it (position/size/scale/
+    /// rotation/opacity/name) untouched. Flash's own Swap Symbol does the
+    /// same: it's a per-*instance* operation, not a Library-wide rename —
+    /// every other instance of the original symbol is completely
+    /// unaffected. Rendering (native and web export alike) already
+    /// resolves `SymbolInstance.symbolID` against `doc.library` fresh every
+    /// time, so this needs no rendering-side changes at all — it's purely
+    /// which id this one instance carries.
+    func swapSymbol(at ref: SymbolPlacementRef, to newSymbolID: UUID) {
+        guard let layer = layers.first(where: { $0.id == ref.layerID }),
+              var instance = layer.symbolFrames[ref.keyframe],
+              library.contains(where: { $0.id == newSymbolID })
+        else { return }
+        withUndoSnapshot {
+            instance.symbolID = newSymbolID
+            layer.symbolFrames[ref.keyframe] = instance
+        }
     }
 
     /// Same arrow-key nudge as `nudgeSelectedPlacement`, for a selected
@@ -497,8 +615,10 @@ final class TimelineDocument {
             }
             layer.symbolFrames[kf] = copied
             layer.textFrames[kf] = nil
+            layer.shapeFrames[kf] = nil
             selectedSymbolPlacement = SymbolPlacementRef(layerID: layer.id, keyframe: kf)
             selectedPlacement = nil
+            selectedShapePlacement = nil
         }
     }
 
@@ -507,15 +627,22 @@ final class TimelineDocument {
         withUndoSnapshot(coalesce: "symbolname:\(symbolID)") { library[idx].name = name }
     }
 
-    /// A read/write binding onto one Library symbol's shared content — same
+    /// A read/write binding onto a Library symbol's frame-1 content — same
     /// idiom as `binding(for:)`, edits ripple to every instance since every
-    /// instance just references this same `symbolID`.
-    func symbolBinding(_ symbolID: UUID) -> Binding<FlajSymbol>? {
-        guard let idx = library.firstIndex(where: { $0.id == symbolID }) else { return nil }
+    /// instance just references this same `symbolID`. Scoped to the
+    /// value-type `PlacedText` itself (the symbol's frame-1 content) rather
+    /// than the whole `FlajSymbol` — `FlajSymbol.layers` holds `TLLayer`
+    /// class instances, so a `Binding<FlajSymbol>` mutated via a computed
+    /// property would write straight through to the shared layer the
+    /// instant it's touched, ahead of this method's own `withUndoSnapshot`,
+    /// corrupting undo; a `Binding<PlacedText>` round-trips a genuine value
+    /// copy through `set`, exactly like every other content edit here.
+    func symbolContentBinding(_ symbolID: UUID) -> Binding<PlacedText>? {
+        guard let symbol = library.first(where: { $0.id == symbolID }), let layer = symbol.layers.first else { return nil }
         return Binding(
-            get: { self.library[idx] },
+            get: { layer.textFrames[1] ?? PlacedText(text: "", x: 0, y: 0) },
             set: { newValue in
-                self.withUndoSnapshot(coalesce: "symbol:\(symbolID)") { self.library[idx] = newValue }
+                self.withUndoSnapshot(coalesce: "symbolcontent:\(symbolID)") { layer.textFrames[1] = newValue }
             }
         )
     }
@@ -526,17 +653,184 @@ final class TimelineDocument {
     /// consistent instead of leaving that dangling.
     func deleteSymbol(_ symbolID: UUID) {
         guard let idx = library.firstIndex(where: { $0.id == symbolID }) else { return }
+        // Deleting a symbol currently open in edit-in-place (or an
+        // ancestor of the one currently open) would otherwise leave
+        // `editingPath` pointing at a now-nonexistent library entry —
+        // `layers` above falls back to the document root harmlessly, but
+        // the breadcrumb would keep showing a dangling name. Back out to
+        // wherever's still valid instead.
+        if let cut = editingPath.firstIndex(of: symbolID) {
+            editingPath.removeSubrange(cut...)
+        }
         withUndoSnapshot {
             library.remove(at: idx)
-            for layer in layers {
+            for layer in rootLayers {
                 for (frame, instance) in layer.symbolFrames where instance.symbolID == symbolID {
                     layer.symbolFrames[frame] = nil
+                }
+            }
+            for symbol in library {
+                for layer in symbol.layers {
+                    for (frame, instance) in layer.symbolFrames where instance.symbolID == symbolID {
+                        layer.symbolFrames[frame] = nil
+                    }
                 }
             }
             if let ref = selectedSymbolPlacement, layers.first(where: { $0.id == ref.layerID })?.symbolFrames[ref.keyframe] == nil {
                 selectedSymbolPlacement = nil
             }
         }
+    }
+
+    // MARK: - Shape tool (vector drawing)
+
+    struct ShapePlacementRef: Equatable {
+        let layerID: UUID; let keyframe: Int
+        var undoToken: String { "shapeplacement:\(layerID)-\(keyframe)" }
+    }
+
+    var selectedShapePlacement: ShapePlacementRef?
+
+    /// Drops a new shape at `rect` (Stage pixel coordinates, already
+    /// normalized to a positive width/height — see StageView's drag-to-draw
+    /// gesture, which is what actually determines the rect the user drew,
+    /// Shift-constrained to a square/circle or not) on `selectedLayer` at
+    /// the keyframe governing `selectedFrame` — same "needs an actual
+    /// keyframe" rule as `placeText`/`placeSymbolInstance`.
+    func placeShape(kind: ShapeKind, rect: CGRect) {
+        guard let layer = selectedLayer else { return }
+        guard let kf = layer.governingKeyframe(at: selectedFrame) else {
+            logToConsole("Select or insert a keyframe on \"\(layer.name)\" before drawing a shape.", level: .warn)
+            return
+        }
+        withUndoSnapshot {
+            let shape = PlacedShape(kind: kind, x: rect.minX, y: rect.minY, width: max(1, rect.width), height: max(1, rect.height))
+            layer.shapeFrames[kf] = shape
+            layer.textFrames[kf] = nil
+            layer.symbolFrames[kf] = nil
+            selectedShapePlacement = ShapePlacementRef(layerID: layer.id, keyframe: kf)
+            selectedPlacement = nil
+            selectedSymbolPlacement = nil
+        }
+    }
+
+    func deleteSelectedShapePlacement() {
+        guard let ref = selectedShapePlacement, let layer = layers.first(where: { $0.id == ref.layerID }) else { return }
+        withUndoSnapshot {
+            layer.shapeFrames[ref.keyframe] = nil
+            selectedShapePlacement = nil
+        }
+    }
+
+    /// Same idiom as `binding(for: TextPlacementRef)`.
+    func binding(for ref: ShapePlacementRef) -> Binding<PlacedShape>? {
+        guard let layer = layers.first(where: { $0.id == ref.layerID }) else { return nil }
+        return Binding(
+            get: { layer.shapeFrames[ref.keyframe] ?? PlacedShape(x: 0, y: 0) },
+            set: { newValue in
+                self.withUndoSnapshot(coalesce: ref.undoToken) { layer.shapeFrames[ref.keyframe] = newValue }
+            }
+        )
+    }
+
+    /// Same arrow-key nudge as `nudgeSelectedPlacement`, for a selected shape.
+    func nudgeSelectedShapePlacement(dx: CGFloat, dy: CGFloat) {
+        guard let ref = selectedShapePlacement, let binding = binding(for: ref) else { return }
+        binding.wrappedValue.x += dx
+        binding.wrappedValue.y += dy
+    }
+
+    @ObservationIgnored private var copiedShape: PlacedShape?
+
+    var hasCopiedShape: Bool { copiedShape != nil }
+
+    func copySelectedShapePlacement() {
+        guard let ref = selectedShapePlacement, let layer = layers.first(where: { $0.id == ref.layerID }) else { return }
+        copiedShape = layer.shapeFrames[ref.keyframe]
+    }
+
+    /// Same idiom as `pastePlacedText`/`pasteSymbolInstance`.
+    func pasteShape(layer: TLLayer, at frame: Int) {
+        guard let copied = copiedShape else { return }
+        withUndoSnapshot {
+            let kf: Int
+            if let existing = layer.governingKeyframe(at: frame), existing == frame {
+                kf = existing
+            } else {
+                insertKeyframe(layer: layer, at: frame, blank: false)
+                kf = frame
+            }
+            layer.shapeFrames[kf] = copied
+            layer.textFrames[kf] = nil
+            layer.symbolFrames[kf] = nil
+            selectedShapePlacement = ShapePlacementRef(layerID: layer.id, keyframe: kf)
+            selectedPlacement = nil
+            selectedSymbolPlacement = nil
+        }
+    }
+
+    // MARK: - Edit-in-place: entering/leaving a symbol's own Timeline
+
+    /// Enters a symbol's own Timeline for editing — double-clicking a
+    /// placed instance on Stage enters the symbol it's an instance of,
+    /// after which `layers`/`totalFrames` above transparently mean *this*
+    /// symbol's content instead of the document's root, everywhere (Stage,
+    /// frame grid, addLayer/insertKeyframe/etc.) without any of those
+    /// needing to know edit-in-place exists at all. Nests: entering an
+    /// instance placed *inside* the symbol already being edited pushes a
+    /// second level, same as Flash's own Edit in Place lets you drill into
+    /// a nested Movie Clip.
+    func enterSymbolEditing(_ symbolID: UUID) {
+        guard library.contains(where: { $0.id == symbolID }) else { return }
+        editingPath.append(symbolID)
+        resetSelectionForNewEditingScope()
+    }
+
+    /// Backs out one level of edit-in-place — the innermost symbol first —
+    /// matching Flash's Escape-key convention (call again to keep backing
+    /// out, all the way to the document's own root Timeline).
+    func exitSymbolEditing() {
+        exitSymbolEditing(toDepth: editingPath.count - 1)
+    }
+
+    /// Jumps straight back to the document's own root Timeline from any
+    /// depth — the breadcrumb's leftmost "Scene 1" crumb.
+    func exitAllSymbolEditing() {
+        exitSymbolEditing(toDepth: 0)
+    }
+
+    /// Jumps to an arbitrary depth in `editingPath` in one step — the
+    /// breadcrumb's general case, of which `exitSymbolEditing()` (depth
+    /// `editingPath.count - 1`) and `exitAllSymbolEditing()` (depth 0) are
+    /// just the two most common instances. A no-op if already at `depth`.
+    func exitSymbolEditing(toDepth depth: Int) {
+        let clamped = min(max(depth, 0), editingPath.count)
+        guard clamped != editingPath.count else { return }
+        editingPath.removeLast(editingPath.count - clamped)
+        resetSelectionForNewEditingScope()
+    }
+
+    /// Whatever was selected belonged to the Timeline we just left, not the
+    /// one now in view — same reset `load(from:)` already does when
+    /// opening a whole new document, since switching which Timeline
+    /// `layers` means is exactly that, just scoped to one symbol instead
+    /// of the whole file.
+    private func resetSelectionForNewEditingScope() {
+        selectedLayerID = layers.first?.id
+        playhead = 1
+        selectedFrame = 1
+        hasSelectedFrame = false
+        rangeSelectionEnd = nil
+        selectedPlacement = nil
+        selectedSymbolPlacement = nil
+        selectedShapePlacement = nil
+    }
+
+    /// The breadcrumb trail's labels, outermost to innermost — "Scene 1"
+    /// for the document's own root Timeline (Flash's own name for it),
+    /// plus one entry per nested symbol currently being edited in place.
+    var editingBreadcrumb: [String] {
+        ["Scene 1"] + editingPath.compactMap { id in library.first(where: { $0.id == id })?.name }
     }
 
     // MARK: - Onion skinning
@@ -551,6 +845,52 @@ final class TimelineDocument {
     // onion markers are draggable on the ruler; a fixed symmetric range
     // with a small adjustable count is the scoped-down equivalent here.
     var onionSkinRange: Int = 2
+
+    // MARK: - Rulers & guides
+
+    // Rulers are purely an editor overlay (see StageView's ruler views) —
+    // never saved, same as onionSkinEnabled above, and for the same
+    // reason: nothing about them belongs to the document's actual content.
+    var rulersVisible: Bool = true
+    // Guides themselves (`guides` below) DO belong to the document — a
+    // deliberately placed layout aid the user built up, the same tier as
+    // stageWidth/stageColor — but whether they're currently drawn is a
+    // separate, transient view preference (Flash's own View > Guides >
+    // Show Guides toggle doesn't delete anything either), so it lives here
+    // ungoverned by undo/persistence, same as rulersVisible.
+    var guidesVisible: Bool = true
+
+    /// The document's ruler guides — Flash's dragged-from-the-ruler layout
+    /// lines. Persisted (see Persistence.swift), unlike `guidesVisible`/
+    /// `rulersVisible` above.
+    var guides: [Guide] = []
+
+    /// Drops a new guide at `position` (Stage-space y for a horizontal
+    /// guide, x for a vertical one) — StageView's ruler-drag gesture is
+    /// what actually determines this, mirroring `placeShape`'s own
+    /// "caller already resolved the real-world coordinates" split.
+    func addGuide(orientation: GuideOrientation, position: CGFloat) {
+        withUndoSnapshot {
+            guides.append(Guide(orientation: orientation, position: position))
+        }
+    }
+
+    /// Slides an existing guide to `position` — called continuously while
+    /// dragging (coalesced into one undo step per drag) and once more on
+    /// drop.
+    func moveGuide(id: UUID, to position: CGFloat) {
+        guard let index = guides.firstIndex(where: { $0.id == id }) else { return }
+        withUndoSnapshot(coalesce: "guide:\(id)") {
+            guides[index].position = position
+        }
+    }
+
+    func removeGuide(id: UUID) {
+        guard guides.contains(where: { $0.id == id }) else { return }
+        withUndoSnapshot {
+            guides.removeAll { $0.id == id }
+        }
+    }
 
     /// Places a new default text box on `selectedLayer` at the keyframe that
     /// governs `selectedFrame`, and selects it. Mirrors the Actions panel's
@@ -567,8 +907,10 @@ final class TimelineDocument {
             let placement = PlacedText(x: point.x, y: point.y)
             layer.textFrames[kf] = placement
             layer.symbolFrames[kf] = nil
+            layer.shapeFrames[kf] = nil
             selectedPlacement = TextPlacementRef(layerID: layer.id, keyframe: kf)
             selectedSymbolPlacement = nil
+            selectedShapePlacement = nil
         }
     }
 
@@ -667,8 +1009,10 @@ final class TimelineDocument {
             }
             layer.textFrames[kf] = copied
             layer.symbolFrames[kf] = nil
+            layer.shapeFrames[kf] = nil
             selectedPlacement = TextPlacementRef(layerID: layer.id, keyframe: kf)
             selectedSymbolPlacement = nil
+            selectedShapePlacement = nil
         }
     }
 
@@ -685,6 +1029,7 @@ final class TimelineDocument {
         let scripts: [Int: String]
         let textFrames: [Int: PlacedText]
         let symbolFrames: [Int: SymbolInstance]
+        let shapeFrames: [Int: PlacedShape]
         let tweenSettings: [Int: TweenSettings]
         let colorTweenSettings: [Int: TweenSettings]
         let labels: [Int: String]
@@ -701,6 +1046,7 @@ final class TimelineDocument {
         var scripts: [Int: String] = [:]
         var textFrames: [Int: PlacedText] = [:]
         var symbolFrames: [Int: SymbolInstance] = [:]
+        var shapeFrames: [Int: PlacedShape] = [:]
         var tweenSettings: [Int: TweenSettings] = [:]
         var colorTweenSettings: [Int: TweenSettings] = [:]
         var labels: [Int: String] = [:]
@@ -709,12 +1055,13 @@ final class TimelineDocument {
             if let v = layer.frameScripts[frame] { scripts[offset] = v }
             if let v = layer.textFrames[frame] { textFrames[offset] = v }
             if let v = layer.symbolFrames[frame] { symbolFrames[offset] = v }
+            if let v = layer.shapeFrames[frame] { shapeFrames[offset] = v }
             if let v = layer.tweenSettings[frame] { tweenSettings[offset] = v }
             if let v = layer.colorTweenSettings[frame] { colorTweenSettings[offset] = v }
             if let v = layer.frameLabels[frame] { labels[offset] = v }
         }
         copiedFrames = CopiedFrames(
-            marks: marks, scripts: scripts, textFrames: textFrames, symbolFrames: symbolFrames,
+            marks: marks, scripts: scripts, textFrames: textFrames, symbolFrames: symbolFrames, shapeFrames: shapeFrames,
             tweenSettings: tweenSettings, colorTweenSettings: colorTweenSettings, labels: labels
         )
     }
@@ -733,6 +1080,7 @@ final class TimelineDocument {
             for (offset, v) in copied.scripts { layer.frameScripts[startFrame + offset] = v }
             for (offset, v) in copied.textFrames { layer.textFrames[startFrame + offset] = v }
             for (offset, v) in copied.symbolFrames { layer.symbolFrames[startFrame + offset] = v }
+            for (offset, v) in copied.shapeFrames { layer.shapeFrames[startFrame + offset] = v }
             for (offset, v) in copied.tweenSettings { layer.tweenSettings[startFrame + offset] = v }
             for (offset, v) in copied.colorTweenSettings { layer.colorTweenSettings[startFrame + offset] = v }
             for (offset, v) in copied.labels { layer.frameLabels[startFrame + offset] = v }
@@ -799,9 +1147,11 @@ final class TimelineDocument {
             growCapacity(to: max(totalFrames, newEnd))
             let movedText = layer.textFrames[oldEnd]
             let movedSymbol = layer.symbolFrames[oldEnd]
+            let movedShape = layer.shapeFrames[oldEnd]
             let movedScript = layer.frameScripts[oldEnd]
             layer.textFrames[oldEnd] = nil
             layer.symbolFrames[oldEnd] = nil
+            layer.shapeFrames[oldEnd] = nil
             layer.frameScripts[oldEnd] = nil
 
             if newEnd > oldEnd {
@@ -811,6 +1161,7 @@ final class TimelineDocument {
             }
             layer.textFrames[newEnd] = movedText
             layer.symbolFrames[newEnd] = movedSymbol
+            layer.shapeFrames[newEnd] = movedShape
             layer.frameScripts[newEnd] = movedScript
             layer.frames[newEnd - 1] = .keyframe(hasScript: !(movedScript ?? "").isEmpty)
 
@@ -850,12 +1201,14 @@ final class TimelineDocument {
             let script = layer.frameScripts[from]
             let text = layer.textFrames[from]
             let symbol = layer.symbolFrames[from]
+            let shape = layer.shapeFrames[from]
             let label = layer.frameLabels[from]
 
             layer.frames[from - 1] = .empty
             layer.frameScripts[from] = nil
             layer.textFrames[from] = nil
             layer.symbolFrames[from] = nil
+            layer.shapeFrames[from] = nil
             layer.frameLabels[from] = nil
             // Any `.plain` continuation this keyframe was governing is now
             // ungoverned (nothing behind it to continue from) — clear it
@@ -870,6 +1223,7 @@ final class TimelineDocument {
             layer.frameScripts[to] = script
             layer.textFrames[to] = text
             layer.symbolFrames[to] = symbol
+            layer.shapeFrames[to] = shape
             layer.frameLabels[to] = label
 
             if selectedFrame == from { selectedFrame = to }
@@ -921,8 +1275,8 @@ final class TimelineDocument {
     @ObservationIgnored private var timerSource: DispatchSourceTimer?
 
     init(layers: [TLLayer], totalFrames: Int) {
-        self.layers = layers
-        self.totalFrames = totalFrames
+        self.rootLayers = layers
+        self.rootTotalFrames = totalFrames
         self.selectedLayerID = layers.first?.id
     }
 
@@ -1577,6 +1931,7 @@ final class TimelineDocument {
             layer.frameScripts[frame] = nil
             layer.textFrames[frame] = nil
             layer.symbolFrames[frame] = nil
+            layer.shapeFrames[frame] = nil
             layer.tweenSettings[frame] = nil
             layer.colorTweenSettings[frame] = nil
             layer.frameLabels[frame] = nil

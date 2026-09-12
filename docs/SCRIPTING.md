@@ -58,13 +58,28 @@ whichever layers happen to have the relevant keyframes. Calling with a
 label that doesn't exist anywhere logs a console warning and leaves the
 playhead where it was — it doesn't jump to frame 0 or throw.
 
-## Background
+A label starting with `#` doubles as a deep link in the exported web
+page — the moment the playhead actually reaches that frame, the page's URL
+fragment updates to match, becoming a real, back/forward-navigable browser
+history entry. Opening the exported page with a URL that already ends in a
+matching `#label` starts there instead of frame 1. Native-app-only
+playback (no exported page to have a URL) ignores this — a `#`-prefixed
+label works everywhere `gotoAndStop('#menu')` would, it just doesn't do
+anything extra outside the browser.
+
+## Stage
 
 ```js
+stage.size(800, 450);
 bg.color('#111827');
 bg.color('cornflowerblue');   // any CSS color keyword
 bg.color('transparent');
 ```
+
+`stage.size` resizes the Stage itself (both dimensions clamp to a minimum
+of 1px) — everything already placed keeps its own pixel coordinates, so
+this is about changing the render surface's size, not repositioning or
+rescaling its content to fit.
 
 ## Stage objects
 
@@ -107,6 +122,14 @@ an instance has spawned, further edits to its symbol or its Timeline
 placement don't retroactively move it — it's an independent object from
 then on, same as anything else `stage.addText` created.
 
+If the symbol has more than one frame (see "Symbols" in the README — a
+placed instance normally plays its symbol's frames independently and
+continuously, looping on its own), spawning freezes it: the snapshot is
+always taken from the symbol's frame 1, regardless of which frame the
+instance's loop actually happened to be showing at the moment it spawned.
+A spawned instance never keeps looping — like everything else about it,
+its appearance is a one-time copy, not a live reflection of the symbol.
+
 ## Click-through (clickTag)
 
 The banner-ad "clickTAG" convention — a plain property, not a method:
@@ -119,7 +142,9 @@ Once set, the whole Stage becomes one big link: click anywhere on it (over
 placed text and stage objects too, not just empty background) and it opens
 that URL in a new window/tab, cursor and all. Usually set once in frame 1's
 script and left alone — it stays in effect for the rest of the movie, same
-behavior in the native app's own preview and the exported page.
+behavior in the native app's own preview and the exported page. The
+exported page also makes it keyboard-reachable (Tab to it, Enter or Space
+to activate) — the native app's own preview is mouse/trackpad-only.
 
 ## Console
 

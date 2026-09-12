@@ -26,10 +26,22 @@ final class PersistenceTests: XCTestCase {
         XCTAssertEqual(reloaded.webExportAlignment, original.webExportAlignment)
         XCTAssertEqual(reloaded.webExportPageBackground.cssString, original.webExportPageBackground.cssString)
         XCTAssertEqual(reloaded.webExportMinify, original.webExportMinify)
+        XCTAssertEqual(reloaded.guides, original.guides)
         XCTAssertEqual(reloaded.layers.count, original.layers.count)
         // load(from:) re-selects the first layer, same as opening a document fresh.
         XCTAssertEqual(reloaded.selectedLayerID, reloaded.layers.first?.id)
-        XCTAssertEqual(reloaded.library, original.library)
+        // FlajSymbol isn't Equatable (it carries TLLayer, a class, same
+        // reason the top-level `layers` comparison below is also
+        // field-by-field rather than a single XCTAssertEqual).
+        XCTAssertEqual(reloaded.library.count, original.library.count)
+        for (want, got) in zip(original.library, reloaded.library) {
+            XCTAssertEqual(got.name, want.name)
+            XCTAssertEqual(got.totalFrames, want.totalFrames)
+            XCTAssertEqual(got.layers.count, want.layers.count)
+            for (wantLayer, gotLayer) in zip(want.layers, got.layers) {
+                XCTAssertEqual(gotLayer.textFrames, wantLayer.textFrames)
+            }
+        }
 
         for (want, got) in zip(original.layers, reloaded.layers) {
             XCTAssertEqual(got.name, want.name)
@@ -43,6 +55,7 @@ final class PersistenceTests: XCTestCase {
             XCTAssertEqual(got.frameScripts, want.frameScripts)
             XCTAssertEqual(got.textFrames, want.textFrames)
             XCTAssertEqual(got.symbolFrames, want.symbolFrames)
+            XCTAssertEqual(got.shapeFrames, want.shapeFrames)
             XCTAssertEqual(got.tweenSettings, want.tweenSettings)
             XCTAssertEqual(got.colorTweenSettings, want.colorTweenSettings)
             XCTAssertEqual(got.frameLabels, want.frameLabels)
@@ -77,14 +90,70 @@ final class PersistenceTests: XCTestCase {
         let file = try JSONDecoder().decode(FlajDocumentFile.self, from: legacyJSON)
         XCTAssertTrue(file.layers[0].textFrames.isEmpty)
         XCTAssertTrue(file.layers[0].symbolFrames.isEmpty)
+        XCTAssertTrue(file.layers[0].shapeFrames.isEmpty)
         XCTAssertTrue(file.layers[0].tweenSettings.isEmpty)
         XCTAssertTrue(file.library.isEmpty)
+        XCTAssertTrue(file.guides.isEmpty)
 
         let doc = TimelineDocument(layers: [TLLayer(name: "placeholder", swatch: .black, frames: [.empty])], totalFrames: 1)
         doc.load(from: file)
 
         XCTAssertEqual(doc.layers.count, 1)
         XCTAssertEqual(doc.layers[0].frames, [.keyframe(hasScript: false), .empty])
+    }
+
+    /// A `.flaj` file saved before a symbol's content became a nested
+    /// Timeline (`FlajSymbol.layers`/`totalFrames`) has flat `text`/
+    /// `fontName`/`fontSize`/`bold`/`italic`/`colorHex`/`alignment` fields
+    /// directly on each library entry instead — `FlajSymbolFile`'s custom
+    /// decoder must synthesize the same one-layer/one-frame Timeline the
+    /// current flat convenience initializer builds, so an old symbol still
+    /// opens looking exactly the same.
+    func testLegacyFlatSymbolLibraryStillOpensAsANestedTimeline() throws {
+        let legacyJSON = Data("""
+        {
+          "version": 1,
+          "totalFrames": 1,
+          "fps": 12,
+          "stageWidth": 550,
+          "stageHeight": 400,
+          "stageColorHex": "#FFFFFF",
+          "layers": [],
+          "library": [
+            {
+              "id": "8C8A9A9E-1DDB-4B3C-9C8F-1E7C6E9F0A01",
+              "name": "Badge",
+              "text": "HELLO",
+              "fontName": "Courier",
+              "fontSize": 20,
+              "bold": true,
+              "italic": false,
+              "colorHex": "#FF0000",
+              "alignment": "leading"
+            }
+          ]
+        }
+        """.utf8)
+
+        let file = try JSONDecoder().decode(FlajDocumentFile.self, from: legacyJSON)
+        XCTAssertEqual(file.library.count, 1)
+        XCTAssertEqual(file.library[0].totalFrames, 1)
+        XCTAssertEqual(file.library[0].layers.count, 1)
+        let content = try XCTUnwrap(file.library[0].layers[0].textFrames[1])
+        XCTAssertEqual(content.text, "HELLO")
+        XCTAssertEqual(content.fontName, "Courier")
+        XCTAssertEqual(content.fontSize, 20)
+        XCTAssertTrue(content.bold)
+        XCTAssertEqual(content.colorHex, "#FF0000")
+
+        let doc = TimelineDocument(layers: [TLLayer(name: "placeholder", swatch: .black, frames: [.empty])], totalFrames: 1)
+        doc.load(from: file)
+
+        XCTAssertEqual(doc.library.count, 1)
+        XCTAssertEqual(doc.library[0].name, "Badge")
+        XCTAssertEqual(doc.library[0].text, "HELLO")
+        XCTAssertEqual(doc.library[0].fontName, "Courier")
+        XCTAssertTrue(doc.library[0].bold)
     }
 
     func testLoadResetsTransientPlaybackState() throws {

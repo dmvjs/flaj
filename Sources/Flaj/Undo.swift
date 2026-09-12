@@ -31,6 +31,17 @@ extension TimelineDocument {
         let selectedFrame: Int
         let selectedPlacement: TextPlacementRef?
         let selectedSymbolPlacement: SymbolPlacementRef?
+        let selectedShapePlacement: ShapePlacementRef?
+        // Which symbol's Timeline (if any) `layers`/`totalFrames` meant at
+        // the moment of this snapshot — restoring it is what makes undoing
+        // an edit made while editing a symbol in place also put the Stage
+        // back into that same edit-in-place context, not just revert its
+        // content while silently leaving the view wherever it happened to
+        // be. Not part of `file`/`makeSaveFile()`: that always captures the
+        // document's own root Timeline plus every symbol's content
+        // independently (see Persistence.swift), regardless of which one
+        // was on screen — this is purely the navigation half.
+        let editingPath: [UUID]
     }
 
     static let undoStackLimit = 200
@@ -42,7 +53,8 @@ extension TimelineDocument {
         UndoEntry(
             file: makeSaveFile(), selectedLayerID: selectedLayerID,
             playhead: playhead, selectedFrame: selectedFrame, selectedPlacement: selectedPlacement,
-            selectedSymbolPlacement: selectedSymbolPlacement
+            selectedSymbolPlacement: selectedSymbolPlacement, selectedShapePlacement: selectedShapePlacement,
+            editingPath: editingPath
         )
     }
 
@@ -100,6 +112,11 @@ extension TimelineDocument {
 
     private func restore(_ entry: UndoEntry) {
         applySaveFile(entry.file)
+        // Restored before resolving selectedLayerID/selectedPlacement below
+        // so `layers` (computed — see TimelineModel.swift) already points
+        // at the right Timeline when those lookups run, same as it will
+        // for every view reading `doc.layers` right after this returns.
+        editingPath = entry.editingPath
         selectedLayerID = layers.first(where: { $0.id == entry.selectedLayerID })?.id ?? layers.first?.id
         playhead = min(max(entry.playhead, 1), max(totalFrames, 1))
         selectedFrame = min(max(entry.selectedFrame, 1), max(totalFrames, 1))
@@ -115,6 +132,12 @@ extension TimelineDocument {
             selectedSymbolPlacement = ref
         } else {
             selectedSymbolPlacement = nil
+        }
+        if let ref = entry.selectedShapePlacement,
+           layers.first(where: { $0.id == ref.layerID })?.shapeFrames[ref.keyframe] != nil {
+            selectedShapePlacement = ref
+        } else {
+            selectedShapePlacement = nil
         }
     }
 }

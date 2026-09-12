@@ -143,7 +143,11 @@ enum DocumentFixtures {
         )
         art.expanded = false
         art.textFrames = [
-            1: PlacedText(text: "A", x: 1, y: 2, width: 30, height: 12, colorHex: "#112233", opacity: 1, scale: 1, rotation: 0),
+            1: PlacedText(
+                text: "A", x: 1, y: 2, width: 30, height: 12, colorHex: "#112233", opacity: 1, scale: 1, rotation: 0,
+                dropShadow: DropShadowFilter(colorHex: "#000000", blur: 4, offsetX: 2, offsetY: 2, opacity: 0.5),
+                glow: GlowFilter(colorHex: "#FFFFFF", blur: 8, opacity: 0.8)
+            ),
             3: PlacedText(text: "B", x: 10, y: 20, width: 30, height: 12, colorHex: "#445566", opacity: 0.4, scale: 1.5, rotation: 45)
         ]
         art.tweenSettings = [1: TweenSettings(family: .elastic, direction: .easeInOut, amount: 65, rotate: .cw, rotateTimes: 2)]
@@ -157,7 +161,16 @@ enum DocumentFixtures {
         )
         props.symbolFrames = [1: SymbolInstance(symbolID: symbol.id, x: 50, y: 60, width: 40, height: 18, opacity: 0.9, scale: 1.2, rotation: 15, name: "badge1")]
 
-        let doc = TimelineDocument(layers: [actions, art, props], totalFrames: 3)
+        let shapes = TLLayer(name: "shapes", swatch: .red, indent: 0, frames: [.keyframe(hasScript: false), .empty, .empty])
+        shapes.shapeFrames = [
+            1: PlacedShape(
+                kind: .ellipse, x: 5, y: 6, width: 44, height: 22,
+                fillColorHex: "#3399FF", fillOpacity: 0.75, strokeColorHex: "#112233", strokeOpacity: 0.9,
+                strokeWidth: 3, opacity: 0.85
+            )
+        ]
+
+        let doc = TimelineDocument(layers: [actions, art, props, shapes], totalFrames: 3)
         doc.library = [symbol]
         doc.stageWidth = 320
         doc.stageHeight = 180
@@ -168,6 +181,34 @@ enum DocumentFixtures {
         doc.webExportAlignment = .bottomTrailing
         doc.webExportPageBackground = Color(red: 0.4, green: 0.1, blue: 0.6, opacity: 0.5)
         doc.webExportMinify = false
+        doc.guides = [
+            Guide(orientation: .horizontal, position: 50),
+            Guide(orientation: .vertical, position: 120)
+        ]
+        return doc
+    }
+
+    /// A rectangle on one layer and an ellipse on another, both static (no
+    /// tween — shapes aren't tweenable in v1, see `PlacedShape`'s own doc
+    /// comment) — the minimal document exercising player.js's shape
+    /// rendering path (`syncShapeVisual`/`applyShapeStyle`) for both kinds
+    /// at once.
+    static func placedShapes() -> TimelineDocument {
+        let rectLayer = TLLayer(name: "rect", swatch: .blue, frames: [.keyframe(hasScript: false)])
+        rectLayer.shapeFrames[1] = PlacedShape(
+            kind: .rectangle, x: 10, y: 10, width: 60, height: 40,
+            fillColorHex: "#3399FF", fillOpacity: 1, strokeColorHex: "#000000", strokeOpacity: 1, strokeWidth: 2
+        )
+        let ellipseLayer = TLLayer(name: "ellipse", swatch: .green, frames: [.keyframe(hasScript: false)])
+        ellipseLayer.shapeFrames[1] = PlacedShape(
+            kind: .ellipse, x: 80, y: 20, width: 30, height: 30,
+            fillColorHex: "#FF0000", fillOpacity: 0.5, strokeColorHex: "#00FF00", strokeOpacity: 1, strokeWidth: 4
+        )
+        let doc = TimelineDocument(layers: [rectLayer, ellipseLayer], totalFrames: 1)
+        doc.stageWidth = 200
+        doc.stageHeight = 100
+        doc.stageColor = .white
+        doc.fps = 8
         return doc
     }
 

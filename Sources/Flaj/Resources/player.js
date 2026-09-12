@@ -22,6 +22,7 @@
   const stageEl = document.getElementById('flaj-stage');
   const textLayerEl = document.getElementById('flaj-text-layer');
   const objectsLayerEl = document.getElementById('flaj-objects-layer');
+  const shapesLayerEl = document.getElementById('flaj-shapes-layer');
 
   let stageWidth = doc.stageWidth;
   let stageHeight = doc.stageHeight;
@@ -150,6 +151,11 @@
     return cssLinearEasing(t => easedProgress(settings, t));
   }
 
+  function cssEasingForSimple(name) {
+    const fn = SIMPLE_EASING[name] || SIMPLE_EASING.linear;
+    return name === 'linear' ? 'linear' : cssLinearEasing(fn);
+  }
+
   // ---- placed text: real Web Animations per tween span ----
   // (mirrors TLLayer.interpolatedPlacedText, but the interpolation itself
   // happens natively — this only computes the two keyframes' endpoints.)
@@ -174,6 +180,7 @@
     el.style.fontFamily = base.fontName + ', sans-serif';
     el.style.fontWeight = base.bold ? 'bold' : 'normal';
     el.style.fontStyle = base.italic ? 'italic' : 'normal';
+    el.style.textShadow = textShadowCSS(base);
     const align = textAlignStyle(base.alignment);
     el.style.textAlign = align.textAlign;
     el.style.justifyContent = align.justifyContent;
@@ -192,17 +199,123 @@
     return (doc.library || []).find(s => s.id === symbolID) || null;
   }
 
+  // A symbol's shared content is a real Timeline — `symbol.layers[0]` —
+  // the same nested shape FlajSymbol carries natively (see StageObject.swift).
+  // A placed instance plays it independently of the parent, looping its
+  // own frames continuously (Flash's actual Movie Clip behavior) — see
+  // symbolLocalFrame/applySymbolLoopFrame below for the per-tick side of
+  // this; `symbolContent` itself only ever resolves frame 1, used for a
+  // span's initial box/color Web Animation endpoints (see createLayerVisual),
+  // which are about the *instance's own* geometry/opacity tween, not which
+  // frame of the symbol is showing — that's applied separately, every
+  // tick, so it can keep advancing independently of whether the instance
+  // itself is mid-tween or sitting still.
+  function symbolContent(symbol) {
+    const layer = symbol.layers && symbol.layers[0];
+    return (layer && layer.textFrames && layer.textFrames[1]) || null;
+  }
+
+  // Mirrors FlajSymbol.localFrame in StageObject.swift exactly — see its
+  // doc comment for why this counts from the instance's own governing
+  // keyframe rather than wall-clock time or absolute frame 0.
+  function symbolLocalFrame(symbol, parentFrame, governingKeyframe) {
+    const span = Math.max(symbol.totalFrames || 1, 1);
+    const elapsed = parentFrame - governingKeyframe;
+    return (((elapsed % span) + span) % span) + 1;
+  }
+
+  // Same channel-wise sRGB lerp as TimelineDocument.interpolateHex in
+  // TimelineModel.swift, so a color tween authored inside a symbol's own
+  // Timeline eases through the same intermediate colors here as it would
+  // natively, not just jump at the midpoint.
+  // "#rrggbb" -> [r, g, b], 0...255 each. Shared by lerpHexColor (easing
+  // between two colors) and textShadowCSS (turning a filter's colorHex +
+  // opacity into one rgba() CSS color) below — the one place either needs
+  // to actually read hex digits apart.
+  function hexComponents(hex) {
+    let s = (hex || '#000000').trim();
+    if (s.charAt(0) === '#') s = s.slice(1);
+    const v = parseInt(s, 16);
+    const n = Number.isNaN(v) ? 0 : v;
+    return [(n >> 16) & 0xFF, (n >> 8) & 0xFF, n & 0xFF];
+  }
+
+  function lerpHexColor(fromHex, toHex, t) {
+    const from = hexComponents(fromHex), to = hexComponents(toHex);
+    const lerp = (a, b) => Math.round(a + (b - a) * t);
+    const byte = (n) => n.toString(16).padStart(2, '0').toUpperCase();
+    return '#' + byte(lerp(from[0], to[0])) + byte(lerp(from[1], to[1])) + byte(lerp(from[2], to[2]));
+  }
+
+  // Mirrors PropertiesPanelView/StageView's own Drop Shadow + Glow
+  // rendering (see StageView's placedTextFilters) as CSS text-shadow —
+  // glow is offset (0, 0), drop shadow carries its own offsetX/offsetY;
+  // both can be present at once, same as the two stacked SwiftUI shadows
+  // natively. Returns 'none' (a valid, explicit "no shadow" text-shadow
+  // value) when neither filter is set, rather than an empty string, so a
+  // span that starts with a shadow and moves to a keyframe without one
+  // actually clears it instead of leaving the old value in place.
+  function textShadowCSS(content) {
+    const layers = [];
+    if (content.glow) {
+      const [r, g, b] = hexComponents(content.glow.colorHex);
+      layers.push(`0px 0px ${content.glow.blur}px rgba(${r}, ${g}, ${b}, ${content.glow.opacity})`);
+    }
+    if (content.dropShadow) {
+      const [r, g, b] = hexComponents(content.dropShadow.colorHex);
+      layers.push(`${content.dropShadow.offsetX}px ${content.dropShadow.offsetY}px ${content.dropShadow.blur}px rgba(${r}, ${g}, ${b}, ${content.dropShadow.opacity})`);
+    }
+    return layers.length > 0 ? layers.join(', ') : 'none';
+  }
+
+  // Mirrors TLLayer.interpolatedPlacedText in TimelineModel.swift, scoped
+  // to a symbol's own layer — real tween support (fontSize/scale/rotation
+  // eased linearly against the curve's own progress, opacity/color against
+  // colorTweenSettings' own, independently) for a symbol's internal
+  // Timeline, not a discrete jump between keyframes.
+  function interpolatedSymbolContent(layer, frame) {
+    const kf = governingKeyframe(layer.frames, frame);
+    const base = kf != null ? layer.textFrames[kf] : null;
+    if (!base) return null;
+    const endKf = tweenTarget(layer.frames, kf);
+    const end = endKf != null ? layer.textFrames[endKf] : null;
+    if (!end || endKf <= kf) return base;
+    const rawT = (frame - kf) / (endKf - kf);
+    const t = easedProgress(layer.tweenSettings[kf], rawT);
+    const colorT = easedProgress(layer.colorTweenSettings[kf], rawT);
+    return {
+      text: base.text, fontName: base.fontName, bold: base.bold, italic: base.italic, alignment: base.alignment,
+      dropShadow: base.dropShadow, glow: base.glow,
+      fontSize: base.fontSize + (end.fontSize - base.fontSize) * t,
+      scale: (base.scale ?? 1) + ((end.scale ?? 1) - (base.scale ?? 1)) * t,
+      rotation: (base.rotation ?? 0) + ((end.rotation ?? 0) - (base.rotation ?? 0)) * t,
+      opacity: base.opacity + (end.opacity - base.opacity) * colorT,
+      colorHex: lerpHexColor(base.colorHex, end.colorHex, colorT)
+    };
+  }
+
   function resolvePlacement(layer, kf) {
     if (layer.textFrames[kf]) return layer.textFrames[kf];
     const instance = layer.symbolFrames && layer.symbolFrames[kf];
     if (!instance) return null;
     const symbol = findSymbol(instance.symbolID);
-    if (!symbol) return null; // orphaned reference — render nothing rather than throw
+    const content = symbol && symbolContent(symbol);
+    if (!content) return null; // orphaned/empty reference — render nothing rather than throw
     return {
-      text: symbol.text, fontName: symbol.fontName, fontSize: symbol.fontSize,
-      bold: symbol.bold, italic: symbol.italic, colorHex: symbol.colorHex, alignment: symbol.alignment,
+      text: content.text, fontName: content.fontName, fontSize: content.fontSize,
+      bold: content.bold, italic: content.italic, colorHex: content.colorHex, alignment: content.alignment,
+      dropShadow: content.dropShadow, glow: content.glow,
       x: instance.x, y: instance.y, width: instance.width, height: instance.height,
-      opacity: instance.opacity, scale: instance.scale, rotation: instance.rotation
+      // Compounded with the symbol's own (frame-1) values, not just the
+      // instance's — same reasoning as StageSymbolInstanceView natively:
+      // both are real, independent tweenable quantities that must combine,
+      // not one silently overriding the other. This only ever reflects
+      // frame 1 (used for this span's Web Animation endpoints, built once
+      // at span creation) — the live per-tick value as the symbol loops is
+      // applySymbolLoopFrame's job below.
+      opacity: instance.opacity * (content.opacity ?? 1),
+      scale: instance.scale * (content.scale ?? 1),
+      rotation: instance.rotation + (content.rotation ?? 0)
     };
   }
 
@@ -239,29 +352,201 @@
     const endKf = tweenTarget(layer.frames, kf);
     const end = endKf != null ? resolvePlacement(layer, endKf) : null;
     const animations = [];
+
+    // If this span's content is a symbol instance whose symbol has more
+    // than one frame, remember enough (which symbol/instance, and this
+    // span's own governing keyframe) to keep advancing its independent
+    // internal loop every tick — see applySymbolLoopFrame, called from
+    // syncLayerVisual.
+    const instance = layer.symbolFrames && layer.symbolFrames[kf];
+    const symbol = instance && findSymbol(instance.symbolID);
+    const loop = symbol && (symbol.totalFrames || 1) > 1 ? { symbol, kf, instance } : null;
+    const endInstance = loop && endKf != null && layer.symbolFrames && layer.symbolFrames[endKf];
+
     if (endKf != null && end && endKf > kf) {
       const durationMs = ((endKf - kf) / fps) * 1000;
-
       const boxSettings = layer.tweenSettings[kf];
-      const totalSpin = spinDegrees(boxSettings, 1);
-      const boxAnimation = el.animate(
-        [boxKeyframe(base, 0), boxKeyframe(end, totalSpin)],
-        { duration: durationMs, easing: cssEasingForTween(boxSettings), fill: 'both' }
-      );
-      boxAnimation.pause();
-      animations.push(boxAnimation);
-
       const colorSettings = layer.colorTweenSettings[kf];
-      const colorAnimation = el.animate(
-        [colorKeyframe(base), colorKeyframe(end)],
-        { duration: durationMs, easing: cssEasingForTween(colorSettings), fill: 'both' }
-      );
-      colorAnimation.pause();
-      animations.push(colorAnimation);
+
+      if (loop && endInstance) {
+        // The placed instance is *also* classic-tweened while its symbol
+        // independently loops — two differently-timed, differently-eased
+        // curves whose combined value (product for opacity/scale, sum for
+        // rotation) no single CSS easing function could express as one
+        // two-point animation. Resampled into an evenly spaced keyframe
+        // list instead — the same trick cssLinearEasing already uses to
+        // bake a single non-monotonic curve into a browser-native
+        // `linear()` timing function, just applied to the combined
+        // *values* themselves rather than one progress scalar — so this
+        // still plays as one real, compositor-driven Web Animation
+        // instead of a per-tick JS override fighting it every paint.
+        const { boxFrames, colorFrames } = resampleCombinedSymbolLoopKeyframes(
+          instance, endInstance, boxSettings, colorSettings, symbol, kf, endKf
+        );
+        const boxAnimation = el.animate(boxFrames, { duration: durationMs, easing: 'linear', fill: 'both' });
+        boxAnimation.pause();
+        animations.push(boxAnimation);
+
+        const colorAnimation = el.animate(colorFrames, { duration: durationMs, easing: 'linear', fill: 'both' });
+        colorAnimation.pause();
+        animations.push(colorAnimation);
+      } else {
+        const totalSpin = spinDegrees(boxSettings, 1);
+        const boxAnimation = el.animate(
+          [boxKeyframe(base, 0), boxKeyframe(end, totalSpin)],
+          { duration: durationMs, easing: cssEasingForTween(boxSettings), fill: 'both' }
+        );
+        boxAnimation.pause();
+        animations.push(boxAnimation);
+
+        const colorAnimation = el.animate(
+          [colorKeyframe(base), colorKeyframe(end)],
+          { duration: durationMs, easing: cssEasingForTween(colorSettings), fill: 'both' }
+        );
+        colorAnimation.pause();
+        animations.push(colorAnimation);
+      }
     } else {
       Object.assign(el.style, boxKeyframe(base, 0), colorKeyframe(base));
     }
-    return { kf, element: el, animations };
+
+    return { kf, element: el, animations, loop };
+  }
+
+  // See createLayerVisual's own comment on why this exists. Samples the
+  // *combined* instance+content value of every box/color property at
+  // `steps` evenly spaced points across [kf, endKf] — the same 40-step
+  // granularity cssLinearEasing already uses for a single curve — and
+  // returns two ready-to-animate WAAPI keyframe arrays. `boxSettings`/
+  // `colorSettings` govern the *instance's* own tween exactly as they
+  // always have; the symbol's own internal easing is already baked into
+  // whatever interpolatedSymbolContent returns at each sampled frame, so
+  // the two curves' shapes both survive despite being flattened into one
+  // list of plain values with `easing: 'linear'` between them.
+  function resampleCombinedSymbolLoopKeyframes(instanceBase, instanceEnd, boxSettings, colorSettings, symbol, kf, endKf) {
+    const steps = 40;
+    const layer = symbol.layers && symbol.layers[0];
+    const totalSpin = spinDegrees(boxSettings, 1);
+    const lerp = (a, b, t) => a + (b - a) * t;
+    const boxFrames = [];
+    const colorFrames = [];
+    for (let i = 0; i <= steps; i++) {
+      const rawT = i / steps;
+      const boxT = easedProgress(boxSettings, rawT);
+      const colorT = easedProgress(colorSettings, rawT);
+      // Floored: governingKeyframe/interpolatedSymbolContent index straight
+      // into the frames array assuming an integer frame number (mirroring
+      // TLLayer's own Int-typed `frame` parameters natively) — a fractional
+      // sample here would silently miss the array and throw. The symbol's
+      // own loop only ever actually advances on integer frame boundaries
+      // anyway (see applySymbolLoopFrame's identical Math.floor), so this
+      // matches its real behavior, not just working around the indexing.
+      const parentFrame = Math.floor(kf + rawT * (endKf - kf));
+      const local = symbolLocalFrame(symbol, parentFrame, kf);
+      const content = (layer && interpolatedSymbolContent(layer, local)) || {};
+      const instScale = lerp(instanceBase.scale ?? 1, instanceEnd.scale ?? 1, boxT);
+      const instRotation = lerp(instanceBase.rotation ?? 0, instanceEnd.rotation ?? 0, boxT) + totalSpin * boxT;
+      const instOpacity = lerp(instanceBase.opacity ?? 1, instanceEnd.opacity ?? 1, colorT);
+      boxFrames.push({
+        offset: rawT,
+        left: lerp(instanceBase.x, instanceEnd.x, boxT) + 'px',
+        top: lerp(instanceBase.y, instanceEnd.y, boxT) + 'px',
+        width: lerp(instanceBase.width, instanceEnd.width, boxT) + 'px',
+        height: lerp(instanceBase.height, instanceEnd.height, boxT) + 'px',
+        fontSize: (content.fontSize ?? 24) + 'px',
+        transform: `scale(${instScale * (content.scale ?? 1)}) rotate(${instRotation + (content.rotation ?? 0)}deg)`
+      });
+      colorFrames.push({
+        offset: rawT,
+        color: content.colorHex ?? '#000000',
+        opacity: String(instOpacity * (content.opacity ?? 1))
+      });
+    }
+    return { boxFrames, colorFrames };
+  }
+
+  // Advances a looping symbol instance's own internal frame independently
+  // of its span's box/color Web Animation — called every tick regardless
+  // of whether the span itself just changed, since the loop keeps
+  // advancing even while the instance sits mid-span doing nothing else.
+  //
+  // text/fontFamily/fontWeight/fontStyle always apply directly: textContent
+  // isn't a CSS property WAAPI can touch at all, and the other three only
+  // support *discrete* (not eased) keyframing, not worth resampling for
+  // when a direct write already gets them exactly right every tick.
+  // fontSize/color/opacity/scale/rotation are different — those genuinely
+  // interpolate, and when the instance itself is *also* classic-tweened,
+  // createLayerVisual already baked the correct combined value straight
+  // into that Web Animation (see resampleCombinedSymbolLoopKeyframes), so
+  // writing them here too would be redundant at best and would lose the
+  // fight against the running Animation's own per-paint reapplication at
+  // worst. They're only written here for the untweened case (no Animation
+  // exists at all — see createLayerVisual's `else` branch — so this is the
+  // only thing keeping them in sync as the loop advances).
+  function applySymbolLoopFrame(visual, frame) {
+    if (!visual.loop) return;
+    const { symbol, kf, instance } = visual.loop;
+    const layer = symbol.layers && symbol.layers[0];
+    if (!layer) return;
+    const local = symbolLocalFrame(symbol, frame, kf);
+    const content = interpolatedSymbolContent(layer, local);
+    if (!content) return;
+    const el = visual.element;
+    el.textContent = content.text;
+    el.style.fontFamily = content.fontName + ', sans-serif';
+    el.style.fontWeight = content.bold ? 'bold' : 'normal';
+    el.style.fontStyle = content.italic ? 'italic' : 'normal';
+    el.style.textShadow = textShadowCSS(content); // not WAAPI-animated by anything, so always safe to set directly
+    if (visual.animations.length > 0) return;
+    el.style.fontSize = content.fontSize + 'px';
+    el.style.color = content.colorHex;
+    el.style.opacity = String(instance.opacity * content.opacity);
+    el.style.transform = `scale(${instance.scale * content.scale}) rotate(${instance.rotation + content.rotation}deg)`;
+  }
+
+  // ---- shapes (mirrors StagePlacedShapeView in StageView.swift) ----
+  // Shapes aren't tweenable in v1 (see PlacedShape's own doc comment in
+  // StageObject.swift) — no Web Animation needed, just a plain div
+  // re-styled whenever its governing keyframe changes, same idiom as
+  // createLayerVisual's own untweened (`else`) branch.
+
+  function applyShapeStyle(el, shape) {
+    el.style.left = shape.x + 'px';
+    el.style.top = shape.y + 'px';
+    el.style.width = shape.width + 'px';
+    el.style.height = shape.height + 'px';
+    el.style.backgroundColor = hexWithAlpha(shape.fillColorHex, shape.fillOpacity);
+    el.style.borderStyle = shape.strokeWidth > 0 ? 'solid' : 'none';
+    el.style.borderWidth = shape.strokeWidth + 'px';
+    el.style.borderColor = hexWithAlpha(shape.strokeColorHex, shape.strokeOpacity);
+    el.style.borderRadius = shape.kind === 'ellipse' ? '50%' : '0';
+    el.style.opacity = String(shape.opacity);
+  }
+
+  function hexWithAlpha(hex, opacity) {
+    const [r, g, b] = hexComponents(hex);
+    return `rgba(${r}, ${g}, ${b}, ${opacity})`;
+  }
+
+  const layerShapeVisuals = new Map(); // layerIndex -> { kf, element }
+
+  function syncShapeVisual(layerIndex, layer, kf) {
+    const shape = layer.shapeFrames[kf];
+    let visual = layerShapeVisuals.get(layerIndex);
+    if (!visual || visual.kf !== kf) {
+      if (visual) visual.element.remove();
+      const el = document.createElement('div');
+      el.className = 'flaj-shape';
+      shapesLayerEl.appendChild(el);
+      visual = { kf, element: el };
+      layerShapeVisuals.set(layerIndex, visual);
+    }
+    applyShapeStyle(visual.element, shape);
+  }
+
+  function removeShapeVisual(layerIndex) {
+    const visual = layerShapeVisuals.get(layerIndex);
+    if (visual) { visual.element.remove(); layerShapeVisuals.delete(layerIndex); }
   }
 
   /// Makes sure `layerIndex` is showing the right span for `frame` (an
@@ -271,6 +556,22 @@
   /// in-progress motion alone to keep running on its own native clock.
   function syncLayerVisual(layerIndex, layer, frame, forceTimeSync) {
     const kf = governingKeyframe(layer.frames, Math.floor(frame));
+
+    // A shape keyframe is mutually exclusive with text/symbol content on
+    // the same layer (see TLLayer in TimelineModel.swift) — handled
+    // entirely separately from the Web-Animation machinery below, which a
+    // shape never needs (see PlacedShape's own doc comment on why it isn't
+    // tweenable in v1).
+    const shape = kf != null && layer.shapeFrames && layer.shapeFrames[kf];
+    if (shape) {
+      const existingText = layerVisuals.get(layerIndex);
+      if (existingText) { existingText.animations.forEach(a => a.cancel()); existingText.element.remove(); layerVisuals.delete(layerIndex); }
+      if (layer.hidden) { removeShapeVisual(layerIndex); return; }
+      syncShapeVisual(layerIndex, layer, kf);
+      return;
+    }
+    removeShapeVisual(layerIndex);
+
     const existing = layerVisuals.get(layerIndex);
 
     // A named instance already spawned into `stageObjects` (see
@@ -301,6 +602,7 @@
         animation.pause();
       }
     }
+    applySymbolLoopFrame(visual, Math.floor(frame));
   }
 
   function syncAllLayerVisuals(frame, forceTimeSync) {
@@ -351,13 +653,14 @@
       const instance = layer.symbolFrames && layer.symbolFrames[playhead];
       if (!instance || !instance.name || stageObjects.has(instance.name)) continue;
       const symbol = findSymbol(instance.symbolID);
-      if (!symbol) continue;
+      const content = symbol && symbolContent(symbol);
+      if (!content) continue;
       stageObjects.set(instance.name, {
         ...stageObjectDefaults,
-        text: symbol.text, x: instance.x + instance.width / 2, y: instance.y + instance.height / 2,
-        fontSize: symbol.fontSize, color: symbol.colorHex, scale: instance.scale,
+        text: content.text, x: instance.x + instance.width / 2, y: instance.y + instance.height / 2,
+        fontSize: content.fontSize, color: content.colorHex, scale: instance.scale,
         rotation: instance.rotation, opacity: instance.opacity,
-        fontName: symbol.fontName, bold: symbol.bold, italic: symbol.italic
+        fontName: content.fontName, bold: content.bold, italic: content.italic
       });
     }
   }

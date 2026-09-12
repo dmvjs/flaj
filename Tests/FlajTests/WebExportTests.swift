@@ -130,6 +130,279 @@ final class WebExportTests: XCTestCase {
         XCTAssertEqual(top as? String, "150px")
     }
 
+    /// A placed symbol instance plays its own symbol's Timeline
+    /// independently of the parent — Flash's real Movie Clip behavior — so
+    /// a 3-frame symbol sitting on a single unchanging parent keyframe
+    /// still cycles through its own content as the parent frame advances,
+    /// looping back to frame 1 on the 4th frame. Mirrors
+    /// SymbolTests.testSymbolInstanceLoopsThroughItsOwnFramesAsTheParentFrameAdvances
+    /// on the Swift side, through the actual exported page this time.
+    func testSymbolInstanceLoopsIndependentlyInTheExportedPage() async throws {
+        let art = TLLayer(name: "art", swatch: .green, frames: [.keyframe(hasScript: false), .plain, .plain, .plain])
+        let symbolLayer = TLLayer(name: "sym", swatch: .green, frames: [.keyframe(hasScript: false), .keyframe(hasScript: false), .keyframe(hasScript: false)])
+        symbolLayer.textFrames[1] = PlacedText(text: "OPEN", x: 0, y: 0)
+        symbolLayer.textFrames[2] = PlacedText(text: "MID", x: 0, y: 0)
+        symbolLayer.textFrames[3] = PlacedText(text: "SHUT", x: 0, y: 0)
+        let symbol = FlajSymbol(id: UUID(), name: "Blink", layers: [symbolLayer], totalFrames: 3)
+        art.symbolFrames[1] = SymbolInstance(symbolID: symbol.id, x: 0, y: 0, width: 40, height: 20)
+
+        let doc = TimelineDocument(layers: [art], totalFrames: 4)
+        doc.library = [symbol]
+        doc.stageWidth = 100
+        doc.stageHeight = 60
+
+        let url = exportedURL(doc)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let harness = WebViewHarness()
+        try await harness.load(fileURL: url)
+
+        try await harness.evaluate("gotoAndStop(1)")
+        var text = try await harness.evaluate("document.querySelector('.flaj-text').textContent")
+        XCTAssertEqual(text as? String, "OPEN")
+
+        try await harness.evaluate("gotoAndStop(2)")
+        text = try await harness.evaluate("document.querySelector('.flaj-text').textContent")
+        XCTAssertEqual(text as? String, "MID")
+
+        try await harness.evaluate("gotoAndStop(3)")
+        text = try await harness.evaluate("document.querySelector('.flaj-text').textContent")
+        XCTAssertEqual(text as? String, "SHUT")
+
+        try await harness.evaluate("gotoAndStop(4)")
+        text = try await harness.evaluate("document.querySelector('.flaj-text').textContent")
+        XCTAssertEqual(text as? String, "OPEN", "loops back to frame 1 on the 4th parent frame")
+    }
+
+    /// A regression net for a real bug class found while building this:
+    /// a symbol's own internal frame carries opacity/scale/rotation/color/
+    /// fontSize, and so does the placed instance — both must apply
+    /// *together* (compounded), and a tween authored inside the symbol's
+    /// own Timeline must ease smoothly, not jump between keyframes. Uses
+    /// an *untweened* instance placement (no competing box/color Web
+    /// Animation) so every field is expected to update live —
+    /// testSymbolLoopFullyCompoundsEvenWhenTheInstanceItselfIsAlsoTweened
+    /// below covers the harder case where the instance is tweened too.
+    func testSymbolInstanceContentCompoundsWithInstanceTransformAndEasesInternally() async throws {
+        let symbolLayer = TLLayer(name: "art", swatch: .green, frames: [.keyframe(hasScript: false), .tween, .keyframe(hasScript: false)])
+        symbolLayer.textFrames[1] = PlacedText(text: "A", x: 0, y: 0, fontSize: 10, colorHex: "#000000", opacity: 0, scale: 1, rotation: 0)
+        symbolLayer.textFrames[3] = PlacedText(text: "A", x: 0, y: 0, fontSize: 20, colorHex: "#FFFFFF", opacity: 1, scale: 2, rotation: 90)
+        symbolLayer.tweenSettings[1] = TweenSettings(family: .linear)
+        symbolLayer.colorTweenSettings[1] = TweenSettings(family: .linear)
+        let symbol = FlajSymbol(id: UUID(), name: "Fade", layers: [symbolLayer], totalFrames: 3)
+
+        let root = TLLayer(name: "root", swatch: .blue, frames: [.keyframe(hasScript: false), .plain, .plain])
+        root.symbolFrames[1] = SymbolInstance(symbolID: symbol.id, x: 0, y: 0, width: 40, height: 20, opacity: 0.5, scale: 3, rotation: 10)
+
+        let doc = TimelineDocument(layers: [root], totalFrames: 3)
+        doc.library = [symbol]
+        doc.stageWidth = 100
+        doc.stageHeight = 60
+
+        let url = exportedURL(doc)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let harness = WebViewHarness()
+        try await harness.load(fileURL: url)
+
+        func readStyle() async throws -> (opacity: Double, fontSize: Double, color: String, scale: Double, rotationDeg: Double) {
+            let js = """
+            (() => {
+              const el = document.querySelector('.flaj-text');
+              const cs = getComputedStyle(el);
+              const m = new DOMMatrixReadOnly(cs.transform);
+              return [parseFloat(cs.opacity), parseFloat(cs.fontSize), cs.color, Math.hypot(m.a, m.b), Math.atan2(m.b, m.a) * 180 / Math.PI];
+            })()
+            """
+            let result = try await harness.evaluate(js)
+            let arr = try XCTUnwrap(result as? [Any])
+            return (
+                (arr[0] as? NSNumber)?.doubleValue ?? -1, (arr[1] as? NSNumber)?.doubleValue ?? -1,
+                arr[2] as? String ?? "", (arr[3] as? NSNumber)?.doubleValue ?? -1, (arr[4] as? NSNumber)?.doubleValue ?? -999
+            )
+        }
+
+        // Frame 1 (symbol's own frame 1): instance(0.5, scale 3, rot 10) *
+        // content(opacity 0, fontSize 10, scale 1, rot 0).
+        try await harness.evaluate("gotoAndStop(1)")
+        var s = try await readStyle()
+        XCTAssertEqual(s.opacity, 0, accuracy: 0.01, "0.5 (instance) * 0 (content) must be 0, not 0.5 from the instance alone")
+        XCTAssertEqual(s.fontSize, 10, accuracy: 0.01)
+        XCTAssertEqual(s.scale, 3, accuracy: 0.01, "3 (instance) * 1 (content) — content's own scale of 1 must not silently drop the instance's 3")
+        XCTAssertEqual(s.rotationDeg, 10, accuracy: 0.5)
+
+        // Frame 2: the *symbol's own* tween at its eased (linear) midpoint —
+        // proves internal easing, not a discrete jump straight to frame 3's
+        // values.
+        try await harness.evaluate("gotoAndStop(2)")
+        s = try await readStyle()
+        XCTAssertEqual(s.opacity, 0.25, accuracy: 0.01, "0.5 (instance) * 0.5 (content's own eased midpoint)")
+        XCTAssertEqual(s.fontSize, 15, accuracy: 0.01)
+        XCTAssertEqual(s.color, "rgb(128, 128, 128)", "#000000 -> #FFFFFF at t=0.5")
+        XCTAssertEqual(s.scale, 4.5, accuracy: 0.01, "3 (instance) * 1.5 (content eased midpoint)")
+        XCTAssertEqual(s.rotationDeg, 55, accuracy: 0.5, "10 (instance) + 45 (content eased midpoint)")
+
+        // Frame 3 (symbol's own frame 3, its loop's last before wrapping).
+        try await harness.evaluate("gotoAndStop(3)")
+        s = try await readStyle()
+        XCTAssertEqual(s.opacity, 0.5, accuracy: 0.01)
+        XCTAssertEqual(s.fontSize, 20, accuracy: 0.01)
+        XCTAssertEqual(s.scale, 6, accuracy: 0.01)
+        XCTAssertEqual(s.rotationDeg, 100, accuracy: 0.5)
+    }
+
+    /// Drop Shadow + Glow both render as CSS `text-shadow` (see player.js's
+    /// textShadowCSS) — a plain placed text box, the simplest case with no
+    /// symbol/loop machinery involved at all.
+    func testDropShadowAndGlowRenderAsCSSTextShadow() async throws {
+        let layer = TLLayer(name: "text", swatch: .green, frames: [.keyframe(hasScript: false)])
+        layer.textFrames[1] = PlacedText(
+            text: "Flaj", x: 0, y: 0,
+            dropShadow: DropShadowFilter(colorHex: "#000000", blur: 4, offsetX: 2, offsetY: 3, opacity: 0.5),
+            glow: GlowFilter(colorHex: "#FFFFFF", blur: 8, opacity: 0.8)
+        )
+        let doc = TimelineDocument(layers: [layer], totalFrames: 1)
+        doc.stageWidth = 100
+        doc.stageHeight = 60
+
+        let url = exportedURL(doc)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let harness = WebViewHarness()
+        try await harness.load(fileURL: url)
+
+        let shadow = try await harness.evaluate("getComputedStyle(document.querySelector('.flaj-text')).textShadow")
+        let value = try XCTUnwrap(shadow as? String)
+        XCTAssertTrue(value.contains("rgba(255, 255, 255, 0.8)"), "expected the glow's color/opacity in \(value)")
+        XCTAssertTrue(value.contains("rgba(0, 0, 0, 0.5)"), "expected the drop shadow's color/opacity in \(value)")
+        XCTAssertTrue(value.contains("2px 3px"), "expected the drop shadow's own offset in \(value)")
+    }
+
+    /// The bug this is a regression test for: `resolvePlacement`'s symbol
+    /// branch built its returned placement object field-by-field and
+    /// simply forgot dropShadow/glow, so a symbol's filters silently never
+    /// reached the exported page at all despite rendering correctly
+    /// natively. A 2-frame looping symbol with a *different* filter on
+    /// each frame also proves the per-tick loop path (applySymbolLoopFrame)
+    /// picks up the change, not just the span's initial static style.
+    func testSymbolContentFiltersRenderAndUpdateAsTheLoopAdvances() async throws {
+        let symbolLayer = TLLayer(name: "art", swatch: .green, frames: [.keyframe(hasScript: false), .keyframe(hasScript: false)])
+        symbolLayer.textFrames[1] = PlacedText(text: "A", x: 0, y: 0, glow: GlowFilter(colorHex: "#FF0000", blur: 6, opacity: 0.9))
+        symbolLayer.textFrames[2] = PlacedText(text: "A", x: 0, y: 0, dropShadow: DropShadowFilter(colorHex: "#0000FF", blur: 5, offsetX: 1, offsetY: 1, opacity: 0.6))
+        let symbol = FlajSymbol(id: UUID(), name: "Blink", layers: [symbolLayer], totalFrames: 2)
+
+        let root = TLLayer(name: "root", swatch: .blue, frames: [.keyframe(hasScript: false), .plain])
+        root.symbolFrames[1] = SymbolInstance(symbolID: symbol.id, x: 0, y: 0, width: 40, height: 20)
+
+        let doc = TimelineDocument(layers: [root], totalFrames: 2)
+        doc.library = [symbol]
+        doc.stageWidth = 100
+        doc.stageHeight = 60
+
+        let url = exportedURL(doc)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let harness = WebViewHarness()
+        try await harness.load(fileURL: url)
+
+        try await harness.evaluate("gotoAndStop(1)")
+        var shadow = try await harness.evaluate("getComputedStyle(document.querySelector('.flaj-text')).textShadow")
+        XCTAssertTrue(try XCTUnwrap(shadow as? String).contains("rgba(255, 0, 0, 0.9)"), "frame 1's glow")
+
+        try await harness.evaluate("gotoAndStop(2)")
+        shadow = try await harness.evaluate("getComputedStyle(document.querySelector('.flaj-text')).textShadow")
+        XCTAssertTrue(try XCTUnwrap(shadow as? String).contains("rgba(0, 0, 255, 0.6)"), "frame 2's drop shadow, not still frame 1's glow")
+    }
+
+    /// The hard combination: the placed instance is *itself* classic-tweened
+    /// (its own box/color Web Animation) at the same time its symbol
+    /// independently loops through an *internal* tween of its own — two
+    /// differently-timed, differently-eased curves whose combined values
+    /// must both come through correctly. This is what
+    /// resampleCombinedSymbolLoopKeyframes exists for (see its own doc
+    /// comment on why a single two-point Web Animation can't express this,
+    /// and why it isn't just left as a known gap).
+    func testSymbolLoopFullyCompoundsEvenWhenTheInstanceItselfIsAlsoTweened() async throws {
+        let symbolLayer = TLLayer(name: "art", swatch: .green, frames: [.keyframe(hasScript: false), .tween, .keyframe(hasScript: false)])
+        symbolLayer.textFrames[1] = PlacedText(text: "A", x: 0, y: 0, fontSize: 10, colorHex: "#000000", opacity: 0, scale: 1, rotation: 0)
+        symbolLayer.textFrames[3] = PlacedText(text: "A", x: 0, y: 0, fontSize: 20, colorHex: "#FFFFFF", opacity: 1, scale: 2, rotation: 90)
+        symbolLayer.tweenSettings[1] = TweenSettings(family: .linear)
+        symbolLayer.colorTweenSettings[1] = TweenSettings(family: .linear)
+        let symbol = FlajSymbol(id: UUID(), name: "Fade", layers: [symbolLayer], totalFrames: 3)
+
+        let root = TLLayer(name: "root", swatch: .blue, frames: [.keyframe(hasScript: false), .tween, .keyframe(hasScript: false)])
+        root.symbolFrames[1] = SymbolInstance(symbolID: symbol.id, x: 0, y: 0, width: 40, height: 20, opacity: 0.5, scale: 1, rotation: 0)
+        root.symbolFrames[3] = SymbolInstance(symbolID: symbol.id, x: 50, y: 0, width: 40, height: 20, opacity: 1.0, scale: 2, rotation: 90)
+        root.tweenSettings[1] = TweenSettings(family: .linear)
+        root.colorTweenSettings[1] = TweenSettings(family: .linear)
+
+        let doc = TimelineDocument(layers: [root], totalFrames: 3)
+        doc.library = [symbol]
+        doc.stageWidth = 120
+        doc.stageHeight = 60
+
+        let url = exportedURL(doc)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let harness = WebViewHarness()
+        try await harness.load(fileURL: url)
+
+        func readStyle() async throws -> (opacity: Double, fontSize: Double, color: String, scale: Double, rotationDeg: Double) {
+            let js = """
+            (() => {
+              const el = document.querySelector('.flaj-text');
+              const cs = getComputedStyle(el);
+              const m = new DOMMatrixReadOnly(cs.transform);
+              return [parseFloat(cs.opacity), parseFloat(cs.fontSize), cs.color, Math.hypot(m.a, m.b), Math.atan2(m.b, m.a) * 180 / Math.PI];
+            })()
+            """
+            let result = try await harness.evaluate(js)
+            let arr = try XCTUnwrap(result as? [Any])
+            return (
+                (arr[0] as? NSNumber)?.doubleValue ?? -1, (arr[1] as? NSNumber)?.doubleValue ?? -1,
+                arr[2] as? String ?? "", (arr[3] as? NSNumber)?.doubleValue ?? -1, (arr[4] as? NSNumber)?.doubleValue ?? -999
+            )
+        }
+
+        // Frame 1: instance(opacity 0.5, scale 1, rot 0) * symbol frame 1
+        // (opacity 0, fontSize 10, scale 1, rot 0).
+        try await harness.evaluate("gotoAndStop(1)")
+        var s = try await readStyle()
+        XCTAssertEqual(s.opacity, 0, accuracy: 0.02)
+        XCTAssertEqual(s.fontSize, 10, accuracy: 0.1)
+        XCTAssertEqual(s.scale, 1, accuracy: 0.02)
+        XCTAssertEqual(s.rotationDeg, 0, accuracy: 1)
+
+        // Frame 2: *both* curves at their own linear midpoint simultaneously
+        // — instance eased to (opacity 0.75, scale 1.5, rot 45) times the
+        // symbol's own internal midpoint (opacity 0.5, fontSize 15, scale
+        // 1.5, rot 45, color halfway #000->#FFF).
+        try await harness.evaluate("gotoAndStop(2)")
+        s = try await readStyle()
+        XCTAssertEqual(s.opacity, 0.375, accuracy: 0.02, "0.75 (instance eased) * 0.5 (content eased) — both curves must survive being combined")
+        XCTAssertEqual(s.fontSize, 15, accuracy: 0.5)
+        XCTAssertEqual(s.color, "rgb(128, 128, 128)")
+        XCTAssertEqual(s.scale, 2.25, accuracy: 0.05, "1.5 (instance eased) * 1.5 (content eased)")
+        XCTAssertEqual(s.rotationDeg, 90, accuracy: 1, "45 (instance eased) + 45 (content eased)")
+        var text = try await harness.evaluate("document.querySelector('.flaj-text').textContent")
+        XCTAssertEqual(text as? String, "A")
+
+        // Frame 3 is itself a keyframe, not mid-tween — so it's
+        // self-governing (governingKeyframe(3) == 3, not 1), which resets
+        // the symbol's own loop reference point there too, exactly like
+        // the native app's equivalent computed property would (a fresh
+        // governing keyframe is a fresh span for anything anchored to it,
+        // including local-frame counting) — the same consistency this
+        // whole rewrite is about preserving between the two. So frame 3
+        // combines the *frame-3 instance* (opacity 1.0, scale 2, rot 90)
+        // with the symbol's *frame 1* (elapsed 0 from its own new
+        // reference point) rather than continuing to frame 3 of the
+        // symbol's loop.
+        try await harness.evaluate("gotoAndStop(3)")
+        s = try await readStyle()
+        XCTAssertEqual(s.opacity, 0, accuracy: 0.02, "1.0 (instance) * 0 (symbol's own frame 1, its loop counting restarted here)")
+        XCTAssertEqual(s.fontSize, 10, accuracy: 0.1)
+        XCTAssertEqual(s.scale, 2, accuracy: 0.05, "2 (instance) * 1 (symbol frame 1)")
+        XCTAssertEqual(s.rotationDeg, 90, accuracy: 1, "90 (instance) + 0 (symbol frame 1)")
+        text = try await harness.evaluate("document.querySelector('.flaj-text').textContent")
+        XCTAssertEqual(text as? String, "A", "text isn't a CSS-animated property, so it independently keeps updating too")
+    }
+
     /// A symbol instance whose `symbolID` doesn't resolve against
     /// `doc.library` (shouldn't happen via the app's own UI — `deleteSymbol`
     /// purges every instance — but the export must not crash on a
@@ -651,5 +924,50 @@ final class WebExportTests: XCTestCase {
 
         let onclickIsSet = try await harness.evaluate("document.getElementById('flaj-frame').onclick !== null")
         XCTAssertEqual(onclickIsSet as? Bool, false)
+    }
+
+    /// A rectangle and an ellipse (DocumentFixtures.placedShapes) both
+    /// render as `.flaj-shape` divs with the position/size/fill/stroke
+    /// values `applyShapeStyle` in player.js is supposed to translate them
+    /// into — proves the new shape rendering path end to end in a real
+    /// browser, not just that the JSON round-trips.
+    func testPlacedShapesRenderAsPositionedDivsWithFillAndStroke() async throws {
+        let doc = DocumentFixtures.placedShapes()
+        let url = exportedURL(doc)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let harness = WebViewHarness()
+        try await harness.load(fileURL: url)
+
+        let shapeCount = try await harness.evaluate("document.querySelectorAll('.flaj-shape').length")
+        XCTAssertEqual(shapeCount as? Int, 2)
+
+        let rectStyle = try await harness.evaluate("""
+        (() => {
+          const el = document.querySelectorAll('.flaj-shape')[0];
+          const s = getComputedStyle(el);
+          return [s.left, s.top, s.width, s.height, s.backgroundColor, s.borderRadius];
+        })()
+        """)
+        let rect = try XCTUnwrap(rectStyle as? [String])
+        XCTAssertEqual(rect[0], "10px")
+        XCTAssertEqual(rect[1], "10px")
+        XCTAssertEqual(rect[2], "60px")
+        XCTAssertEqual(rect[3], "40px")
+        XCTAssertEqual(rect[4], "rgb(51, 153, 255)")
+        XCTAssertEqual(rect[5], "0px")
+
+        let ellipseStyle = try await harness.evaluate("""
+        (() => {
+          const el = document.querySelectorAll('.flaj-shape')[1];
+          const s = getComputedStyle(el);
+          return [s.backgroundColor, s.borderColor, s.borderWidth, s.borderRadius];
+        })()
+        """)
+        let ellipse = try XCTUnwrap(ellipseStyle as? [String])
+        XCTAssertEqual(ellipse[0], "rgba(255, 0, 0, 0.5)")
+        XCTAssertEqual(ellipse[1], "rgb(0, 255, 0)")
+        XCTAssertEqual(ellipse[2], "4px")
+        XCTAssertNotEqual(ellipse[3], "0px")
     }
 }

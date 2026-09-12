@@ -1,8 +1,9 @@
 import SwiftUI
 
-/// Flash's Tools panel, reduced to the two tools this app currently
-/// supports — Selection (move/resize placed text) and Text (click the
-/// Stage to place a new text box).
+/// Flash's Tools panel, reduced to the tools this app currently supports —
+/// Selection (move/resize placed objects), Text (click the Stage to place a
+/// new text box), and Rectangle/Ellipse (drag across the Stage to draw a
+/// new shape).
 struct ToolbarView: View {
     let doc: TimelineDocument
 
@@ -10,6 +11,8 @@ struct ToolbarView: View {
         VStack(spacing: 4) {
             toolButton(.selection, systemImage: "cursorarrow")
             toolButton(.text, systemImage: "textformat")
+            toolButton(.rectangle, systemImage: "rectangle")
+            toolButton(.ellipse, systemImage: "circle")
             Spacer()
         }
         .padding(.top, 6)

@@ -175,7 +175,7 @@ final class SymbolTests: XCTestCase {
         XCTAssertEqual(doc.library[0].name, "New Name")
     }
 
-    func testSymbolBindingEditsRippleToEveryInstance() {
+    func testSymbolContentBindingEditsRippleToEveryInstance() {
         let layerA = TLLayer(name: "a", swatch: .green, frames: [.keyframe(hasScript: false)])
         let layerB = TLLayer(name: "b", swatch: .blue, frames: [.keyframe(hasScript: false)])
         let symbol = FlajSymbol(name: "Badge", text: "OLD")
@@ -184,7 +184,7 @@ final class SymbolTests: XCTestCase {
         let doc = TimelineDocument(layers: [layerA, layerB], totalFrames: 1)
         doc.library = [symbol]
 
-        guard let binding = doc.symbolBinding(symbol.id) else { return XCTFail("expected a binding") }
+        guard let binding = doc.symbolContentBinding(symbol.id) else { return XCTFail("expected a binding") }
         binding.wrappedValue.text = "NEW"
 
         XCTAssertEqual(doc.library[0].text, "NEW")
@@ -193,6 +193,26 @@ final class SymbolTests: XCTestCase {
         // instance's own geometry.
         XCTAssertEqual(layerA.symbolFrames[1]?.x, 0)
         XCTAssertEqual(layerB.symbolFrames[1]?.x, 50)
+    }
+
+    /// The content binding must actually snapshot for undo — a regression
+    /// test for the exact hazard `symbolContentBinding`'s doc comment
+    /// warns about: editing through a `Binding<FlajSymbol>` instead would
+    /// mutate the shared `TLLayer` before any snapshot was taken, making
+    /// Cmd+Z a no-op.
+    func testSymbolContentEditIsUndoable() {
+        let layer = TLLayer(name: "art", swatch: .green, frames: [.keyframe(hasScript: false)])
+        let symbol = FlajSymbol(name: "Badge", text: "OLD")
+        layer.symbolFrames[1] = SymbolInstance(symbolID: symbol.id, x: 0, y: 0)
+        let doc = TimelineDocument(layers: [layer], totalFrames: 1)
+        doc.library = [symbol]
+
+        guard let binding = doc.symbolContentBinding(symbol.id) else { return XCTFail("expected a binding") }
+        binding.wrappedValue.text = "NEW"
+        XCTAssertEqual(doc.library[0].text, "NEW")
+
+        doc.undo()
+        XCTAssertEqual(doc.library[0].text, "OLD")
     }
 
     func testDeleteSymbolPurgesEveryInstanceAcrossEveryLayer() {
@@ -321,5 +341,283 @@ final class SymbolTests: XCTestCase {
 
         XCTAssertEqual(dest.symbolFrames[3]?.symbolID, symbol.id)
         XCTAssertEqual(dest.symbolFrames[3]?.x, 9)
+    }
+
+    // MARK: - Swap Symbol
+
+    func testSwapSymbolRepointsOnlyTheOneInstance() {
+        let layerA = TLLayer(name: "a", swatch: .green, frames: [.keyframe(hasScript: false)])
+        let layerB = TLLayer(name: "b", swatch: .blue, frames: [.keyframe(hasScript: false)])
+        let original = FlajSymbol(name: "Original", text: "OLD")
+        let replacement = FlajSymbol(name: "Replacement", text: "NEW")
+        layerA.symbolFrames[1] = SymbolInstance(symbolID: original.id, x: 10, y: 20, width: 40, height: 20, opacity: 0.5, scale: 2, rotation: 30, name: "hero")
+        layerB.symbolFrames[1] = SymbolInstance(symbolID: original.id, x: 0, y: 0)
+        let doc = TimelineDocument(layers: [layerA, layerB], totalFrames: 1)
+        doc.library = [original, replacement]
+        let ref = TimelineDocument.SymbolPlacementRef(layerID: layerA.id, keyframe: 1)
+
+        doc.swapSymbol(at: ref, to: replacement.id)
+
+        let swapped = try! XCTUnwrap(layerA.symbolFrames[1])
+        XCTAssertEqual(swapped.symbolID, replacement.id)
+        // Everything else about the instance is untouched.
+        XCTAssertEqual(swapped.x, 10)
+        XCTAssertEqual(swapped.y, 20)
+        XCTAssertEqual(swapped.width, 40)
+        XCTAssertEqual(swapped.height, 20)
+        XCTAssertEqual(swapped.opacity, 0.5)
+        XCTAssertEqual(swapped.scale, 2)
+        XCTAssertEqual(swapped.rotation, 30)
+        XCTAssertEqual(swapped.name, "hero")
+        // A different instance of the *original* symbol elsewhere is a
+        // separate placement — swap is per-instance, not Library-wide.
+        XCTAssertEqual(layerB.symbolFrames[1]?.symbolID, original.id)
+    }
+
+    func testSwapSymbolIsUndoable() {
+        let layer = TLLayer(name: "art", swatch: .green, frames: [.keyframe(hasScript: false)])
+        let original = FlajSymbol(name: "Original", text: "OLD")
+        let replacement = FlajSymbol(name: "Replacement", text: "NEW")
+        layer.symbolFrames[1] = SymbolInstance(symbolID: original.id, x: 0, y: 0)
+        let doc = TimelineDocument(layers: [layer], totalFrames: 1)
+        doc.library = [original, replacement]
+        let ref = TimelineDocument.SymbolPlacementRef(layerID: layer.id, keyframe: 1)
+
+        doc.swapSymbol(at: ref, to: replacement.id)
+        XCTAssertEqual(layer.symbolFrames[1]?.symbolID, replacement.id)
+
+        doc.undo()
+        XCTAssertEqual(doc.layers[0].symbolFrames[1]?.symbolID, original.id)
+    }
+
+    /// Swapping to a symbol id that doesn't exist in the Library (should
+    /// never happen through the app's own UI — the picker only ever offers
+    /// real Library entries — but this is cheap insurance against ever
+    /// producing a dangling reference some other way) must be a no-op.
+    func testSwapSymbolToAnUnknownIDIsANoOp() {
+        let layer = TLLayer(name: "art", swatch: .green, frames: [.keyframe(hasScript: false)])
+        let original = FlajSymbol(name: "Original", text: "OLD")
+        layer.symbolFrames[1] = SymbolInstance(symbolID: original.id, x: 0, y: 0)
+        let doc = TimelineDocument(layers: [layer], totalFrames: 1)
+        doc.library = [original]
+        let ref = TimelineDocument.SymbolPlacementRef(layerID: layer.id, keyframe: 1)
+
+        doc.swapSymbol(at: ref, to: UUID())
+
+        XCTAssertEqual(layer.symbolFrames[1]?.symbolID, original.id)
+        XCTAssertFalse(doc.canUndo, "a no-op swap shouldn't push an undo step either")
+    }
+
+    // MARK: - Edit-in-place: entering/leaving a symbol's own Timeline
+
+    func testEnterSymbolEditingRedirectsLayersAndTotalFramesToTheSymbolsOwn() {
+        let root = TLLayer(name: "root", swatch: .green, frames: [.keyframe(hasScript: false)])
+        let doc = TimelineDocument(layers: [root], totalFrames: 5)
+        let symbol = FlajSymbol(name: "Badge", text: "HELLO")
+        doc.library = [symbol]
+        doc.selectedFrame = 3
+        doc.hasSelectedFrame = true
+        doc.playhead = 3
+
+        doc.enterSymbolEditing(symbol.id)
+
+        XCTAssertEqual(doc.editingPath, [symbol.id])
+        XCTAssertEqual(doc.layers.map(\.id), symbol.layers.map(\.id), "doc.layers should now mean the symbol's own Timeline, not the document's root")
+        XCTAssertEqual(doc.totalFrames, 1)
+        XCTAssertEqual(doc.selectedLayerID, symbol.layers.first?.id)
+        // Entering a different Timeline resets transient selection/playhead
+        // state, same as opening a whole new document does.
+        XCTAssertEqual(doc.playhead, 1)
+        XCTAssertEqual(doc.selectedFrame, 1)
+        XCTAssertFalse(doc.hasSelectedFrame)
+    }
+
+    func testExitSymbolEditingReturnsLayersAndTotalFramesToTheDocumentRoot() {
+        let root = TLLayer(name: "root", swatch: .green, frames: [.keyframe(hasScript: false)])
+        let doc = TimelineDocument(layers: [root], totalFrames: 5)
+        let symbol = FlajSymbol(name: "Badge", text: "HELLO")
+        doc.library = [symbol]
+        doc.enterSymbolEditing(symbol.id)
+
+        doc.exitSymbolEditing()
+
+        XCTAssertTrue(doc.editingPath.isEmpty)
+        XCTAssertEqual(doc.layers.map(\.id), [root.id])
+        XCTAssertEqual(doc.totalFrames, 5)
+    }
+
+    /// The whole point of the redirect: editing "the Timeline" while inside
+    /// a symbol must actually mutate that symbol's shared `FlajSymbol`, not
+    /// some disconnected copy — every instance sees the change once you're
+    /// back out, exactly like editing a symbol's content any other way
+    /// already does.
+    func testEditsMadeWhileInsideASymbolPersistOnTheLibraryEntry() {
+        let root = TLLayer(name: "root", swatch: .green, frames: [.keyframe(hasScript: false)])
+        let doc = TimelineDocument(layers: [root], totalFrames: 1)
+        let symbol = FlajSymbol(name: "Badge", text: "HELLO")
+        doc.library = [symbol]
+
+        doc.enterSymbolEditing(symbol.id)
+        doc.layers[0].textFrames[1] = PlacedText(text: "EDITED", x: 0, y: 0)
+        doc.exitSymbolEditing()
+
+        XCTAssertEqual(doc.library[0].text, "EDITED")
+    }
+
+    /// A symbol instance placed *inside* the symbol currently being edited
+    /// pushes a second level — Flash's own Edit in Place lets you drill
+    /// into arbitrarily nested Movie Clips the same way.
+    func testEnteringASymbolInstancePlacedInsideAnotherSymbolNestsTheEditingPath() {
+        let root = TLLayer(name: "root", swatch: .green, frames: [.keyframe(hasScript: false)])
+        let doc = TimelineDocument(layers: [root], totalFrames: 1)
+        let inner = FlajSymbol(name: "Inner", text: "IN")
+        let outer = FlajSymbol(name: "Outer", text: "OUT")
+        doc.library = [inner, outer]
+        // Place an instance of `inner` on `outer`'s own (synthesized)
+        // layer, at the frame its flat convenience initializer already put
+        // content on.
+        outer.layers[0].textFrames[1] = nil
+        outer.layers[0].symbolFrames[1] = SymbolInstance(symbolID: inner.id, x: 0, y: 0)
+
+        doc.enterSymbolEditing(outer.id)
+        doc.enterSymbolEditing(inner.id)
+
+        XCTAssertEqual(doc.editingPath, [outer.id, inner.id])
+        XCTAssertEqual(doc.layers.map(\.id), inner.layers.map(\.id))
+        XCTAssertEqual(doc.editingBreadcrumb, ["Scene 1", "Outer", "Inner"])
+    }
+
+    func testExitSymbolEditingToDepthJumpsDirectlyToThatLevel() {
+        let root = TLLayer(name: "root", swatch: .green, frames: [.keyframe(hasScript: false)])
+        let doc = TimelineDocument(layers: [root], totalFrames: 1)
+        let inner = FlajSymbol(name: "Inner", text: "IN")
+        let outer = FlajSymbol(name: "Outer", text: "OUT")
+        doc.library = [inner, outer]
+        doc.enterSymbolEditing(outer.id)
+        doc.enterSymbolEditing(inner.id)
+
+        doc.exitSymbolEditing(toDepth: 1)
+        XCTAssertEqual(doc.editingPath, [outer.id])
+
+        doc.exitSymbolEditing(toDepth: 0)
+        XCTAssertTrue(doc.editingPath.isEmpty)
+    }
+
+    /// Deleting a symbol currently open in edit-in-place must back out
+    /// first — otherwise `editingPath` would keep pointing at a
+    /// now-nonexistent Library entry.
+    func testDeletingTheSymbolCurrentlyBeingEditedExitsEditInPlace() {
+        let root = TLLayer(name: "root", swatch: .green, frames: [.keyframe(hasScript: false)])
+        let doc = TimelineDocument(layers: [root], totalFrames: 1)
+        let symbol = FlajSymbol(name: "Badge", text: "HELLO")
+        doc.library = [symbol]
+        doc.enterSymbolEditing(symbol.id)
+
+        doc.deleteSymbol(symbol.id)
+
+        XCTAssertTrue(doc.editingPath.isEmpty)
+        XCTAssertEqual(doc.layers.map(\.id), [root.id])
+    }
+
+    /// Undo restores *which* Timeline was on screen along with its
+    /// content — not just the content, or Cmd+Z after backing out of a
+    /// symbol edit would silently leave you at the root looking at
+    /// whatever the *next* edit happened to touch, per UndoEntry's own
+    /// editingPath field.
+    func testUndoRestoresTheEditingContextAlongsideContent() {
+        let root = TLLayer(name: "root", swatch: .green, frames: [.keyframe(hasScript: false)])
+        root.textFrames[1] = PlacedText(text: "ROOT-OLD", x: 0, y: 0)
+        let doc = TimelineDocument(layers: [root], totalFrames: 1)
+        let symbol = FlajSymbol(name: "Badge", text: "SYMBOL-OLD")
+        doc.library = [symbol]
+
+        doc.enterSymbolEditing(symbol.id)
+        doc.withUndoSnapshot { doc.layers[0].textFrames[1] = PlacedText(text: "SYMBOL-NEW", x: 0, y: 0) }
+        doc.exitSymbolEditing()
+        doc.withUndoSnapshot { doc.layers[0].textFrames[1] = PlacedText(text: "ROOT-NEW", x: 0, y: 0) }
+
+        XCTAssertEqual(doc.library[0].text, "SYMBOL-NEW")
+        XCTAssertEqual(doc.layers.first?.textFrames[1]?.text, "ROOT-NEW")
+        XCTAssertTrue(doc.editingPath.isEmpty)
+
+        // Undo/redo rebuilds fresh TLLayer instances from each snapshot
+        // (see applySaveFile) — every check from here reads back through
+        // `doc.layers`/`doc.library`, never the original `root`/`symbol`
+        // references, which undo doesn't keep mutating in place.
+        doc.undo() // reverts the root edit; we were already at the root when it happened
+        XCTAssertEqual(doc.layers.first?.textFrames[1]?.text, "ROOT-OLD")
+        XCTAssertTrue(doc.editingPath.isEmpty)
+
+        doc.undo() // reverts the symbol edit — and jumps back into editing it, since that's where we were
+        XCTAssertEqual(doc.library[0].text, "SYMBOL-OLD")
+        XCTAssertEqual(doc.editingPath, [symbol.id])
+    }
+
+    // MARK: - Independent nested playback
+
+    /// The core Movie Clip behavior: once placed, an instance loops its
+    /// own frames on its own clock, continuously — never frozen on frame 1
+    /// just because the parent Timeline itself isn't advancing through
+    /// multiple keyframes.
+    func testSymbolInstanceLoopsThroughItsOwnFramesAsTheParentFrameAdvances() {
+        let layer = TLLayer(name: "art", swatch: .green, frames: [.keyframe(hasScript: false), .keyframe(hasScript: false), .keyframe(hasScript: false)])
+        layer.textFrames[1] = PlacedText(text: "OPEN", x: 0, y: 0)
+        layer.textFrames[2] = PlacedText(text: "MID", x: 0, y: 0)
+        layer.textFrames[3] = PlacedText(text: "SHUT", x: 0, y: 0)
+        let symbol = FlajSymbol(id: UUID(), name: "Blink", layers: [layer], totalFrames: 3)
+
+        // Placed on a layer whose own governing keyframe is frame 10 —
+        // proves the loop counts from *that*, not from absolute frame 0.
+        XCTAssertEqual(symbol.content(atLocalFrame: symbol.localFrame(atParentFrame: 10, governingKeyframe: 10))?.text, "OPEN")
+        XCTAssertEqual(symbol.content(atLocalFrame: symbol.localFrame(atParentFrame: 11, governingKeyframe: 10))?.text, "MID")
+        XCTAssertEqual(symbol.content(atLocalFrame: symbol.localFrame(atParentFrame: 12, governingKeyframe: 10))?.text, "SHUT")
+        // Loops back to frame 1 on the 4th parent frame, not stuck or nil,
+        // and keeps looping indefinitely from there.
+        XCTAssertEqual(symbol.content(atLocalFrame: symbol.localFrame(atParentFrame: 13, governingKeyframe: 10))?.text, "OPEN")
+        XCTAssertEqual(symbol.content(atLocalFrame: symbol.localFrame(atParentFrame: 17, governingKeyframe: 10))?.text, "MID")
+    }
+
+    /// Every symbol before this feature had `totalFrames == 1` — this must
+    /// keep resolving to frame 1 forever, regardless of how far the parent
+    /// Timeline has advanced, or every existing single-frame symbol would
+    /// suddenly "loop" in a way that's meaningless for one frame anyway
+    /// but could still crash on a bad modulo.
+    func testSingleFrameSymbolAlwaysResolvesToFrameOneRegardlessOfParentFrame() {
+        let symbol = FlajSymbol(name: "Badge", text: "HELLO")
+        XCTAssertEqual(symbol.localFrame(atParentFrame: 1, governingKeyframe: 1), 1)
+        XCTAssertEqual(symbol.localFrame(atParentFrame: 500, governingKeyframe: 1), 1)
+        XCTAssertEqual(symbol.content(atLocalFrame: symbol.localFrame(atParentFrame: 500, governingKeyframe: 1))?.text, "HELLO")
+    }
+
+    /// A tween authored *inside* a symbol's own Timeline eases exactly like
+    /// a plain PlacedText tween does — `content(atLocalFrame:)` goes
+    /// through the same `interpolatedPlacedText` a top-level box uses, not
+    /// a hardcoded per-keyframe jump.
+    func testContentAtLocalFrameEasesAcrossATweenSpanInsideTheSymbol() {
+        let layer = TLLayer(name: "art", swatch: .green, frames: [.keyframe(hasScript: false), .tween, .keyframe(hasScript: false)])
+        layer.textFrames[1] = PlacedText(text: "A", x: 0, y: 0, opacity: 0)
+        layer.textFrames[3] = PlacedText(text: "A", x: 0, y: 0, opacity: 1)
+        layer.tweenSettings[1] = TweenSettings(family: .linear)
+        layer.colorTweenSettings[1] = TweenSettings(family: .linear)
+        let symbol = FlajSymbol(id: UUID(), name: "Fade", layers: [layer], totalFrames: 3)
+
+        XCTAssertEqual(symbol.content(atLocalFrame: 2)?.opacity, 0.5)
+    }
+
+    /// `content(atLocalFrame:)` must carry scale/rotation through the ease
+    /// too, not just opacity/color — the same model data
+    /// StageSymbolInstanceView compounds with the placed instance's own
+    /// scale/rotation (see its own doc comment on why that compounding
+    /// exists at all: both are real, independent tweenable quantities).
+    func testContentAtLocalFrameEasesScaleAndRotationAcrossATweenSpanInsideTheSymbol() {
+        let layer = TLLayer(name: "art", swatch: .green, frames: [.keyframe(hasScript: false), .tween, .keyframe(hasScript: false)])
+        layer.textFrames[1] = PlacedText(text: "A", x: 0, y: 0, scale: 1, rotation: 0)
+        layer.textFrames[3] = PlacedText(text: "A", x: 0, y: 0, scale: 3, rotation: 90)
+        layer.tweenSettings[1] = TweenSettings(family: .linear)
+        let symbol = FlajSymbol(id: UUID(), name: "Spin", layers: [layer], totalFrames: 3)
+
+        let mid = symbol.content(atLocalFrame: 2)
+        XCTAssertEqual(mid?.scale, 2)
+        XCTAssertEqual(mid?.rotation, 45)
     }
 }

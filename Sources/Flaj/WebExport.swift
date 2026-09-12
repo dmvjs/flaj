@@ -219,10 +219,20 @@ struct WebExportSettingsSheet: View {
                     Text("PAGE BACKGROUND").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
                     // Distinct from the Stage's own bg.color() — this is
                     // what shows in any letterboxing, or through a
-                    // transparent Stage. Opacity is included in the swatch,
-                    // so dragging it to 0 is how you get "transparent".
-                    ColorPicker("", selection: doc.undoableBinding(\.webExportPageBackground, coalesce: "webExportPageBackground"), supportsOpacity: true)
-                        .labelsHidden()
+                    // transparent Stage. Dragging opacity to 0 is how you
+                    // get "transparent" — see webExportPageBackgroundHex/
+                    // OpacityBinding's own doc comment on why color and
+                    // opacity are separate controls here.
+                    HStack(spacing: 6) {
+                        NativeColorWell(color: doc.webExportPageBackgroundHexBinding)
+                        Slider(value: doc.webExportPageBackgroundOpacityBinding, in: 0...1)
+                            .controlSize(.small)
+                            .frame(width: 80)
+                        Text("\(Int((doc.webExportPageBackground.opacityComponent * 100).rounded()))%")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 28, alignment: .trailing)
+                    }
                 }
                 Toggle("Minify JS", isOn: doc.undoableBinding(\.webExportMinify))
                     .toggleStyle(.checkbox)
