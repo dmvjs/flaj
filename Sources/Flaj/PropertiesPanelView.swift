@@ -170,20 +170,24 @@ struct PropertiesPanelView: View {
                     .textFieldStyle(.roundedBorder)
                     .controlSize(.small)
 
-                Picker("", selection: doc.undoableBinding(\.webExportFit)) {
-                    ForEach(StageFit.allCases, id: \.self) { fit in
-                        Text(fit.label).tag(fit)
+                // Fit/Fill/Actual Size as a vertical radio list (not a
+                // segmented control) so it sits comfortably beside the 3x3
+                // alignment grid instead of needing its own full-width row —
+                // both are narrow enough side by side even at the panel's
+                // slim default width, unlike the wider "Page BG" row below
+                // (see its own comment for why that one stays stacked).
+                HStack(alignment: .top, spacing: 10) {
+                    Picker("", selection: doc.undoableBinding(\.webExportFit)) {
+                        ForEach(StageFit.allCases, id: \.self) { fit in
+                            Text(fit.label).tag(fit)
+                        }
                     }
-                }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .controlSize(.small)
+                    .labelsHidden()
+                    .pickerStyle(.radioGroup)
+                    .controlSize(.small)
 
-                // Stacked rather than side-by-side with the alignment grid —
-                // at the panel's slim default width, putting the grid and
-                // this row shoulder to shoulder left too little room for
-                // "Page BG" and it wrapped letter-by-letter.
-                StageAlignmentGrid(selection: doc.undoableBinding(\.webExportAlignment))
+                    StageAlignmentGrid(selection: doc.undoableBinding(\.webExportAlignment))
+                }
                 HStack(spacing: 6) {
                     Text("Page BG").font(.system(size: 11)).foregroundStyle(.secondary).fixedSize()
                     NativeColorWell(color: doc.webExportPageBackgroundHexBinding)
@@ -707,9 +711,25 @@ struct PropertiesPanelView: View {
     /// frameLabelFlags).
     private func labelSection(layer: TLLayer, frame: Int) -> some View {
         sectionLabel("Frame Label") {
-            TextField("Unlabeled", text: doc.labelBinding(layer: layer, at: frame))
-                .textFieldStyle(.roundedBorder)
-                .controlSize(.small)
+            VStack(alignment: .leading, spacing: 4) {
+                TextField("Unlabeled", text: doc.labelBinding(layer: layer, at: frame))
+                    .textFieldStyle(.roundedBorder)
+                    .controlSize(.small)
+                // Type only means anything once there's a label to type —
+                // matches Flash, which also greys this menu out until the
+                // Name field has text.
+                if !doc.labelBinding(layer: layer, at: frame).wrappedValue.isEmpty {
+                    Picker("", selection: doc.labelTypeBinding(layer: layer, at: frame)) {
+                        Text("Name").tag(FrameLabelType.name)
+                        Text("Comment").tag(FrameLabelType.comment)
+                        Text("Anchor").tag(FrameLabelType.anchor)
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .controlSize(.small)
+                    .frame(width: 100)
+                }
+            }
         }
     }
 

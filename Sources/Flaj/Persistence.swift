@@ -208,7 +208,7 @@ struct FlajLayerFile: Codable {
     var groupFrames: [Int: PlacedGroup]
     var tweenSettings: [Int: TweenSettings]
     var colorTweenSettings: [Int: TweenSettings]
-    var frameLabels: [Int: String]
+    var frameLabels: [Int: FrameLabel]
 
     private enum CodingKeys: String, CodingKey {
         case id, name, swatchHex, kind, indent, locked, hidden, masked, expanded, frames, frameScripts, textFrames,
@@ -218,7 +218,7 @@ struct FlajLayerFile: Codable {
     init(id: UUID = UUID(), name: String, swatchHex: String, kind: LayerKind, indent: Int, locked: Bool, hidden: Bool,
          masked: Bool = false, expanded: Bool, frames: [FrameMark], frameScripts: [Int: String], textFrames: [Int: PlacedText],
          symbolFrames: [Int: SymbolInstance] = [:], shapeFrames: [Int: PlacedShape] = [:], groupFrames: [Int: PlacedGroup] = [:],
-         tweenSettings: [Int: TweenSettings], colorTweenSettings: [Int: TweenSettings], frameLabels: [Int: String] = [:]) {
+         tweenSettings: [Int: TweenSettings], colorTweenSettings: [Int: TweenSettings], frameLabels: [Int: FrameLabel] = [:]) {
         self.id = id
         self.name = name
         self.swatchHex = swatchHex
@@ -260,7 +260,16 @@ struct FlajLayerFile: Codable {
         groupFrames = try c.decodeIfPresent([Int: PlacedGroup].self, forKey: .groupFrames) ?? [:]
         tweenSettings = try c.decodeIfPresent([Int: TweenSettings].self, forKey: .tweenSettings) ?? [:]
         colorTweenSettings = try c.decodeIfPresent([Int: TweenSettings].self, forKey: .colorTweenSettings) ?? [:]
-        frameLabels = try c.decodeIfPresent([Int: String].self, forKey: .frameLabels) ?? [:]
+        // Older .flaj files stored a plain String per label — decode that
+        // shape too, inferring `.anchor` for anything already using the
+        // "#"-prefix convention (see FrameLabelType's own doc comment) so a
+        // reopened file doesn't silently lose that behavior's visibility.
+        if let structured = try? c.decodeIfPresent([Int: FrameLabel].self, forKey: .frameLabels) {
+            frameLabels = structured
+        } else {
+            let legacy = try c.decodeIfPresent([Int: String].self, forKey: .frameLabels) ?? [:]
+            frameLabels = legacy.mapValues { FrameLabel(text: $0, type: $0.hasPrefix("#") ? .anchor : .name) }
+        }
     }
 }
 

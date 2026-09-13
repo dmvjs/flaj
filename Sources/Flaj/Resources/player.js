@@ -961,7 +961,8 @@
   // one call site per navigation path), never mid-tween.
   function updateNamedAnchor() {
     for (const layer of doc.layers) {
-      const label = (layer.frameLabels || {})[playhead];
+      const entry = (layer.frameLabels || {})[playhead];
+      const label = entry && entry.type !== 'comment' ? entry.text : null;
       if (label && label.charAt(0) === '#' && location.hash !== label) {
         location.hash = label;
         return;
@@ -1097,7 +1098,7 @@
       const frame = Object.keys(labels)
         .map(Number)
         .sort((a, b) => a - b)
-        .find(f => labels[f] === label);
+        .find(f => labels[f].type !== 'comment' && labels[f].text === label);
       if (frame != null) return frame;
     }
     return null;

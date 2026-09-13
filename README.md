@@ -32,13 +32,19 @@ Full reference and execution model: [`docs/SCRIPTING.md`](docs/SCRIPTING.md). Ty
 
 ## Shortcuts
 
-F5 insert frame · F6 keyframe · F7 blank keyframe · Shift-F5 remove frames — same as Flash.
+F5 insert frame · F6 keyframe · F7 blank keyframe · Shift-F5 remove frames · ⌥⌫ clear frame — same shortcuts as Flash, and the same behavior: F5/Shift-F5 shift every later keyframe (and its content/scripts/labels/tweens) on that layer forward or back, rather than leaving them where they were; Clear Frame is the separate, non-shifting "empty this frame in place" command. Right-click a frame for these plus Cut/Copy/Paste Frames, Select All Frames, and Reverse Frames (which correctly reverses a tween's direction too, not just its frame order).
+
+A keyframe's Frame Label (Properties panel) has a Type, matching Flash's: Name (the default — addressable by `gotoAndPlay`/`gotoAndStop`), Comment (documentation only, excluded from label lookup and never a valid navigation target), and Anchor (also addressable, and updates the exported page's URL fragment when reached — picking it just toggles the leading "#" that behavior already keyed off of).
 
 ⌘Z / ⇧⌘Z undo/redo · ⌘O open · ⌘S save · ⇧⌘S save as · ⌘Return preview (opens a window sized to the Stage's exact pixel dimensions, like Flash's Test Movie). Delete/⌘X/⌘C/⌘V work on the current Stage selection; arrow keys nudge it 1pt (10pt with Shift). ⌘G group · ⇧⌘G ungroup (see "Multi-select & grouping" below).
 
 ⌥⇧⌘R toggle rulers · ⌘; toggle guide visibility — both under the View menu (see "Rulers & guides" below).
 
 Double-click a placed symbol instance to edit its Timeline in place; Escape backs out one level (see "Symbols" below).
+
+## Timeline
+
+Matches Flash's own frame glyphs: a filled dot marks a keyframe with content, a hollow dot a blank keyframe, a small italic *a* above a keyframe's dot means it carries a script, and a hollow rectangle with a trailing tick closes out a plain extended span. A tween's span is tinted and colored by what it's tweening — blue for text/symbol/group ("motion"), green for a shape — with an arrow drawn the length of the span, and a thin rule separates each layer's row from the next. A frame label shows a red flag (Name), a blue anchor (Anchor), or a dimmed comment bubble (Comment) depending on its Type.
 
 ## Export
 

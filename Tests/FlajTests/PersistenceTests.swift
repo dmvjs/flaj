@@ -106,6 +106,41 @@ final class PersistenceTests: XCTestCase {
         XCTAssertEqual(doc.layers[0].frames, [.keyframe(hasScript: false), .empty])
     }
 
+    /// A `.flaj` file saved before frame labels carried a Type (Name/
+    /// Comment/Anchor) stored them as a plain string per frame — decoding
+    /// must still open these, inferring `.anchor` for the pre-existing
+    /// "#"-prefix convention and `.name` for everything else.
+    func testLegacyPlainStringFrameLabelsDecodeWithInferredType() throws {
+        let legacyJSON = Data("""
+        {
+          "version": 1,
+          "totalFrames": 2,
+          "fps": 12,
+          "stageWidth": 550,
+          "stageHeight": 400,
+          "stageColorHex": "#FFFFFF",
+          "layers": [
+            {
+              "name": "actions",
+              "swatchHex": "#FFCC00",
+              "kind": {"normal": {}},
+              "indent": 0,
+              "locked": false,
+              "hidden": false,
+              "expanded": true,
+              "frames": [{"type": "keyframe", "hasScript": false}, {"type": "keyframe", "hasScript": false}],
+              "frameScripts": {},
+              "frameLabels": {"1": "start", "2": "#chapter-two"}
+            }
+          ]
+        }
+        """.utf8)
+
+        let file = try JSONDecoder().decode(FlajDocumentFile.self, from: legacyJSON)
+        XCTAssertEqual(file.layers[0].frameLabels[1], FrameLabel(text: "start", type: .name))
+        XCTAssertEqual(file.layers[0].frameLabels[2], FrameLabel(text: "#chapter-two", type: .anchor))
+    }
+
     /// A `.flaj` file saved before a symbol's content became a nested
     /// Timeline (`FlajSymbol.layers`/`totalFrames`) has flat `text`/
     /// `fontName`/`fontSize`/`bold`/`italic`/`colorHex`/`alignment` fields

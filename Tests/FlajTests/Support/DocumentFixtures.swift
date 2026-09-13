@@ -152,7 +152,7 @@ enum DocumentFixtures {
         ]
         art.tweenSettings = [1: TweenSettings(family: .elastic, direction: .easeInOut, amount: 65, rotate: .cw, rotateTimes: 2)]
         art.colorTweenSettings = [1: TweenSettings(family: .sine, direction: .easeIn, amount: 80)]
-        art.frameLabels = [1: "start"]
+        art.frameLabels = [1: FrameLabel(text: "start")]
 
         let props = TLLayer(name: "props", swatch: .purple, indent: 0, frames: [.keyframe(hasScript: false), .empty, .empty])
         let symbol = FlajSymbol(

@@ -20,6 +20,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.async {
             NSApp.windows.first?.makeKeyAndOrderFront(nil)
         }
+        // A plain `async` here loses the race with SwiftUI's own initial
+        // layout pass, which is what actually claims first responder for
+        // the Timeline's current-frame field (not AppKit's key-view loop —
+        // resigning immediately after makeKeyAndOrderFront above still left
+        // it focused). Deferring a full run-loop turn further lets that
+        // pass finish first, so this is the one that sticks.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            NSApp.windows.first?.makeFirstResponder(nil)
+        }
     }
 }
 
@@ -105,8 +114,10 @@ struct FlajApp: App {
                 Button("Blank Keyframe") { doc.insertKeyframeAtSelection(blank: true) }
                     .keyboardShortcut(.f7, modifiers: [])
                 Divider()
-                Button("Remove Frames") { doc.clearFrameAtSelection() }
+                Button("Remove Frames") { doc.removeFramesAtSelection() }
                     .keyboardShortcut(.f5, modifiers: [.shift])
+                Button("Clear Frame") { doc.clearFrameAtSelection() }
+                    .keyboardShortcut(.delete, modifiers: [.option])
             }
             CommandMenu("View") {
                 Toggle("Rulers", isOn: $doc.rulersVisible)

@@ -15,16 +15,47 @@ final class FrameLabelTests: XCTestCase {
         XCTAssertEqual(binding.wrappedValue, "")
 
         binding.wrappedValue = "start"
-        XCTAssertEqual(layer.frameLabels[1], "start")
+        XCTAssertEqual(layer.frameLabels[1]?.text, "start")
 
         binding.wrappedValue = ""
         XCTAssertNil(layer.frameLabels[1], "an empty string should clear the label, not store it as one")
     }
 
+    func testLabelTypeBindingDefaultsToNameAndAnchorTogglingManagesHashPrefix() {
+        let layer = TLLayer(name: "actions", swatch: .yellow, frames: [.keyframe(hasScript: false)])
+        let doc = TimelineDocument(layers: [layer], totalFrames: 1)
+        doc.labelBinding(layer: layer, at: 1).wrappedValue = "chapter-two"
+
+        let typeBinding = doc.labelTypeBinding(layer: layer, at: 1)
+        XCTAssertEqual(typeBinding.wrappedValue, .name, "a freshly-typed label defaults to Name")
+
+        typeBinding.wrappedValue = .anchor
+        XCTAssertEqual(layer.frameLabels[1]?.text, "#chapter-two", "picking Anchor should add the '#' its behavior keys off")
+
+        typeBinding.wrappedValue = .name
+        XCTAssertEqual(layer.frameLabels[1]?.text, "chapter-two", "leaving Anchor should strip the '#' back off")
+    }
+
+    func testLabelTypeBindingIsANoOpWithNoLabelTextYet() {
+        let layer = TLLayer(name: "actions", swatch: .yellow, frames: [.keyframe(hasScript: false)])
+        let doc = TimelineDocument(layers: [layer], totalFrames: 1)
+
+        doc.labelTypeBinding(layer: layer, at: 1).wrappedValue = .anchor
+        XCTAssertNil(layer.frameLabels[1], "there's nothing to attach a Type to until there's label text")
+    }
+
+    func testCommentTypeLabelsAreExcludedFromFrameForLabelLookup() {
+        let layer = TLLayer(name: "actions", swatch: .yellow, frames: [.keyframe(hasScript: false)])
+        layer.frameLabels[1] = FrameLabel(text: "todo", type: .comment)
+        let doc = TimelineDocument(layers: [layer], totalFrames: 1)
+
+        XCTAssertNil(doc.frame(forLabel: "todo"), "a Comment is documentation only, not a valid navigation target")
+    }
+
     func testFrameForLabelSearchesEveryLayerInDocumentOrder() {
         let a = TLLayer(name: "a", swatch: .green, frames: [.keyframe(hasScript: false), .empty])
         let b = TLLayer(name: "b", swatch: .blue, frames: [.empty, .keyframe(hasScript: false)])
-        b.frameLabels[2] = "loop"
+        b.frameLabels[2] = FrameLabel(text: "loop")
         let doc = TimelineDocument(layers: [a, b], totalFrames: 2)
 
         XCTAssertEqual(doc.frame(forLabel: "loop"), 2)
@@ -33,7 +64,7 @@ final class FrameLabelTests: XCTestCase {
 
     func testClearFrameRemovesItsLabel() {
         let layer = TLLayer(name: "actions", swatch: .yellow, frames: [.keyframe(hasScript: false)])
-        layer.frameLabels[1] = "start"
+        layer.frameLabels[1] = FrameLabel(text: "start")
         let doc = TimelineDocument(layers: [layer], totalFrames: 1)
 
         doc.clearFrame(layer: layer, at: 1)
@@ -48,7 +79,7 @@ final class FrameLabelTests: XCTestCase {
             name: "actions", swatch: .yellow,
             frames: [.keyframe(hasScript: true), .empty, .keyframe(hasScript: false)]
         )
-        layer.frameLabels[3] = "end"
+        layer.frameLabels[3] = FrameLabel(text: "end")
         layer.frameScripts[1] = "gotoAndStop('end');"
         let doc = TimelineDocument(layers: [layer], totalFrames: 3)
 
@@ -97,7 +128,7 @@ final class FrameLabelTests: XCTestCase {
         )
         source.frameScripts[1] = "trace('hi');"
         source.textFrames[3] = PlacedText(text: "B", x: 5, y: 5, width: 10, height: 10)
-        source.frameLabels[1] = "clip-start"
+        source.frameLabels[1] = FrameLabel(text: "clip-start")
         let doc = TimelineDocument(layers: [source], totalFrames: 3)
         doc.selectedLayerID = source.id
         doc.selectFrame(layer: source, frame: 1, extend: false)
@@ -115,7 +146,7 @@ final class FrameLabelTests: XCTestCase {
         XCTAssertEqual(dest.frames[7], .keyframe(hasScript: false))
         XCTAssertEqual(dest.frameScripts[6], "trace('hi');")
         XCTAssertEqual(dest.textFrames[8]?.text, "B")
-        XCTAssertEqual(dest.frameLabels[6], "clip-start")
+        XCTAssertEqual(dest.frameLabels[6]?.text, "clip-start")
     }
 
     func testPasteFramesIsANoOpWithNothingCopied() {

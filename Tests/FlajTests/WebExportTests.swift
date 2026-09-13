@@ -770,7 +770,7 @@ final class WebExportTests: XCTestCase {
             frames: [.keyframe(hasScript: true), .keyframe(hasScript: true)]
         )
         layer.frameScripts = [1: "bg.color('black');", 2: "bg.color('white');"]
-        layer.frameLabels[2] = "white"
+        layer.frameLabels[2] = FrameLabel(text: "white")
         let doc = TimelineDocument(layers: [layer], totalFrames: 2)
         doc.stageWidth = 8
         doc.stageHeight = 8
@@ -826,7 +826,7 @@ final class WebExportTests: XCTestCase {
             name: "actions", swatch: .yellow,
             frames: [.keyframe(hasScript: false), .keyframe(hasScript: false)]
         )
-        layer.frameLabels = [1: "intro", 2: "#chapter-two"]
+        layer.frameLabels = [1: FrameLabel(text: "intro"), 2: FrameLabel(text: "#chapter-two", type: .anchor)]
         let doc = TimelineDocument(layers: [layer], totalFrames: 2)
         doc.stageWidth = 8
         doc.stageHeight = 8
@@ -855,7 +855,7 @@ final class WebExportTests: XCTestCase {
             frames: [.keyframe(hasScript: true), .keyframe(hasScript: true)]
         )
         layer.frameScripts = [1: "bg.color('black');", 2: "bg.color('white');"]
-        layer.frameLabels[2] = "#chapter-two"
+        layer.frameLabels[2] = FrameLabel(text: "#chapter-two", type: .anchor)
         let doc = TimelineDocument(layers: [layer], totalFrames: 2)
         doc.stageWidth = 8
         doc.stageHeight = 8

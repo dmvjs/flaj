@@ -46,6 +46,29 @@ enum LayerKind: Codable, Equatable {
     case normal, folder, mask
 }
 
+/// Flash's own Frame Label "Type" menu. `.name` is an addressable
+/// navigation target (`gotoAndPlay`/`gotoAndStop` by label). `.comment` is
+/// documentation only — excluded from label lookup and never drives
+/// navigation, matching Flash not compiling comments into the exported
+/// movie at all. `.anchor` is also addressable, but additionally updates
+/// the exported page's URL fragment when reached — Flaj already had this
+/// behavior via a "#"-prefixed label text (see `updateNamedAnchor` in
+/// player.js); this type just makes it a real, discoverable Properties
+/// panel choice instead of a convention you had to already know to type.
+enum FrameLabelType: String, Codable, CaseIterable {
+    case name, comment, anchor
+}
+
+/// A keyframe's label — Flash calls this a "Frame Label," shown as a small
+/// flag on the Timeline. `type` changes how `text` behaves (see
+/// `FrameLabelType`) but never how it's stored — an anchor's leading "#" is
+/// still literally part of `text`, since that's the actual mechanism
+/// `updateNamedAnchor`/`findLabeledFrame` key off of.
+struct FrameLabel: Codable, Equatable {
+    var text: String
+    var type: FrameLabelType = .name
+}
+
 /// One line in the debug console — Flash's Output panel equivalent.
 struct ConsoleMessage: Identifiable {
     enum Level: Equatable { case log, warn, error }
@@ -93,7 +116,7 @@ final class TLLayer: Identifiable {
     // gotoAndStop("name")/goto("name") from a frame script, matching
     // Flash's own frame labels. Purely a keyframe annotation, same
     // dictionary shape as frameScripts/textFrames.
-    var frameLabels: [Int: String] = [:]
+    var frameLabels: [Int: FrameLabel] = [:]
     var tweenSettings: [Int: TweenSettings] = [:] // keyed by the tween span's start keyframe
     // Color/opacity ease independently of position/size — same start
     // keyframe key, same span, but its own family/direction/amount, the way
@@ -1373,16 +1396,45 @@ final class TimelineDocument {
 
     // MARK: - Frame labels
 
-    /// A read/write binding onto a keyframe's label — same idiom as
+    /// A read/write binding onto a keyframe's label text — same idiom as
     /// `binding(for:)`/`CodeEditorPanel.scriptBinding(for:)`. Empty string
     /// clears the label (matching how an empty script/text field would
     /// mean "nothing here"), rather than storing `""` as a real label.
+    /// New labels start as `.name`; use `labelTypeBinding` to change that.
     func labelBinding(layer: TLLayer, at frame: Int) -> Binding<String> {
         Binding(
-            get: { layer.frameLabels[frame] ?? "" },
+            get: { layer.frameLabels[frame]?.text ?? "" },
             set: { newValue in
                 self.withUndoSnapshot(coalesce: "label:\(layer.id)-\(frame)") {
-                    layer.frameLabels[frame] = newValue.isEmpty ? nil : newValue
+                    if newValue.isEmpty {
+                        layer.frameLabels[frame] = nil
+                    } else {
+                        layer.frameLabels[frame, default: FrameLabel(text: "")].text = newValue
+                    }
+                }
+            }
+        )
+    }
+
+    /// A read/write binding onto a keyframe's label Type (Name/Comment/
+    /// Anchor) — only meaningful once the label has text (see
+    /// `labelBinding`); a no-op get/set when there's nothing there yet.
+    /// Switching to/from `.anchor` adds/removes the leading "#" its
+    /// behavior actually keys off, so choosing it from the picker works
+    /// without the user needing to type the convention by hand.
+    func labelTypeBinding(layer: TLLayer, at frame: Int) -> Binding<FrameLabelType> {
+        Binding(
+            get: { layer.frameLabels[frame]?.type ?? .name },
+            set: { newType in
+                guard var label = layer.frameLabels[frame] else { return }
+                self.withUndoSnapshot {
+                    if newType == .anchor, !label.text.hasPrefix("#") {
+                        label.text = "#" + label.text
+                    } else if label.type == .anchor, newType != .anchor, label.text.hasPrefix("#") {
+                        label.text.removeFirst()
+                    }
+                    label.type = newType
+                    layer.frameLabels[frame] = label
                 }
             }
         )
@@ -1392,14 +1444,17 @@ final class TimelineDocument {
     /// order — what `gotoAndPlay("label")`/`gotoAndStop`/`goto` resolve
     /// against (see makeJSContext below and player.js's `resolveFrame`,
     /// which must stay in lockstep with this). nil if no keyframe anywhere
-    /// has that exact label.
+    /// has that exact label. Comment-type labels are documentation only —
+    /// excluded here the same way Flash never compiles them into anything
+    /// addressable.
     func frame(forLabel label: String) -> Int? {
         for layer in layers {
             // Dictionary iteration order is unspecified — sort so a layer
             // with (rare) duplicate labels resolves to its earliest frame,
             // deterministically, rather than whichever the hash table
             // happens to visit first.
-            if let match = layer.frameLabels.sorted(by: { $0.key < $1.key }).first(where: { $0.value == label }) {
+            if let match = layer.frameLabels.sorted(by: { $0.key < $1.key })
+                .first(where: { $0.value.type != .comment && $0.value.text == label }) {
                 return match.key
             }
         }
@@ -1458,12 +1513,76 @@ final class TimelineDocument {
         let groupFrames: [Int: PlacedGroup]
         let tweenSettings: [Int: TweenSettings]
         let colorTweenSettings: [Int: TweenSettings]
-        let labels: [Int: String]
+        let labels: [Int: FrameLabel]
     }
 
     @ObservationIgnored private var copiedFrames: CopiedFrames?
 
     var hasCopiedFrames: Bool { copiedFrames != nil }
+
+    /// Select All Frames (Flash's Edit menu) — selects every frame on the
+    /// current layer as one range, same shape `copySelectedFrames`/
+    /// `reverseFrames`/`cutSelectedFrames` already expect from `selectFrame`
+    /// with `extend: true`.
+    func selectAllFrames() {
+        guard let layer = selectedLayer else { return }
+        hasSelectedFrame = true
+        selectedFrame = 1
+        rangeSelectionEnd = layer.frames.count
+    }
+
+    /// Swaps the value at frame `a` with the value at frame `b` in a
+    /// per-frame dictionary — `nil` on either side removes that key rather
+    /// than storing an optional, so a swap against an unoccupied frame
+    /// correctly clears the occupied one. Shared by `reverseFrames`.
+    private func swapFrameEntry<T>(_ dict: inout [Int: T], _ a: Int, _ b: Int) {
+        let valueAtA = dict[a]
+        dict[a] = dict[b]
+        dict[b] = valueAtA
+    }
+
+    /// Reverse Frames (Flash's own frame-range command) — mirrors the
+    /// marks and every per-frame content association within `range` on
+    /// `layer` around its center, so the span plays back in reverse.
+    /// Deliberately leaves `tweenSettings`/`colorTweenSettings` keyed
+    /// where they were: a tween's easing belongs to whichever frame is
+    /// numerically its span's start, which reversal doesn't change (a
+    /// span between the same two positions is still that same span) —
+    /// only which content sits at each end does. Left untouched, a
+    /// reversed tween plays the same curve shape from the old end's
+    /// content to the old start's, which is exactly what "reverse" should
+    /// mean for a tween.
+    func reverseFrames(layer: TLLayer, range: ClosedRange<Int>) {
+        guard range.count > 1 else { return }
+        withUndoSnapshot {
+            let lo = range.lowerBound, hi = range.upperBound
+            for offset in 0..<(range.count / 2) {
+                let a = lo + offset
+                let b = hi - offset
+                layer.frames.swapAt(a - 1, b - 1)
+                swapFrameEntry(&layer.frameScripts, a, b)
+                swapFrameEntry(&layer.textFrames, a, b)
+                swapFrameEntry(&layer.symbolFrames, a, b)
+                swapFrameEntry(&layer.shapeFrames, a, b)
+                swapFrameEntry(&layer.groupFrames, a, b)
+                swapFrameEntry(&layer.frameLabels, a, b)
+            }
+        }
+    }
+
+    /// Cut Frames (Flash's own frame-range command) — Copy Frames followed
+    /// by clearing the cut range's content in place, same as `clearFrame`
+    /// does for one frame at a time (no shifting; a later Paste Frames
+    /// fills the gap back in, matching Flash's own Cut/Paste Frames pair).
+    func cutSelectedFrames() {
+        guard let layer = selectedLayer else { return }
+        copySelectedFrames()
+        withUndoSnapshot {
+            for frame in selectedFrameRange {
+                clearFrame(layer: layer, at: frame)
+            }
+        }
+    }
 
     func copySelectedFrames() {
         guard let layer = selectedLayer else { return }
@@ -1476,7 +1595,7 @@ final class TimelineDocument {
         var groupFrames: [Int: PlacedGroup] = [:]
         var tweenSettings: [Int: TweenSettings] = [:]
         var colorTweenSettings: [Int: TweenSettings] = [:]
-        var labels: [Int: String] = [:]
+        var labels: [Int: FrameLabel] = [:]
         for (offset, frame) in range.enumerated() {
             marks.append(frame - 1 < layer.frames.count ? layer.frames[frame - 1] : .empty)
             if let v = layer.frameScripts[frame] { scripts[offset] = v }
@@ -2357,16 +2476,105 @@ final class TimelineDocument {
         }
     }
 
-    /// F5 in classic Flash — extends content into a blank frame. (Simplified:
-    /// marks the frame as continuing prior content rather than shifting
-    /// everything after it, since frames don't carry real content yet.)
+    /// Re-keys every per-frame dictionary on `layer` so content at or after
+    /// `frame` moves one frame later — `layer.frames` itself is a plain
+    /// array and shifts for free via `Array.insert`, but the dictionaries
+    /// (keyed by frame number, not index) need their keys moved by hand.
+    /// Building a fresh dictionary sidesteps any in-place-overwrite
+    /// ordering hazard entirely. Shared by `insertFrame` only — `moveKeyframe`
+    /// and friends deliberately don't do this (see moveKeyframe's own doc
+    /// comment) since until now nothing needed to renumber more than one
+    /// frame at a time.
+    private func shiftFrameContentKeysForInsert(layer: TLLayer, at frame: Int) {
+        func shifted<T>(_ dict: [Int: T]) -> [Int: T] {
+            var result: [Int: T] = [:]
+            for (key, value) in dict { result[key >= frame ? key + 1 : key] = value }
+            return result
+        }
+        layer.frameScripts = shifted(layer.frameScripts)
+        layer.textFrames = shifted(layer.textFrames)
+        layer.symbolFrames = shifted(layer.symbolFrames)
+        layer.shapeFrames = shifted(layer.shapeFrames)
+        layer.groupFrames = shifted(layer.groupFrames)
+        layer.frameLabels = shifted(layer.frameLabels)
+        layer.tweenSettings = shifted(layer.tweenSettings)
+        layer.colorTweenSettings = shifted(layer.colorTweenSettings)
+    }
+
+    /// The `removeFrames` counterpart — content exactly at `frame` is
+    /// dropped (that frame no longer exists), and everything after moves
+    /// one frame earlier.
+    private func shiftFrameContentKeysForRemove(layer: TLLayer, at frame: Int) {
+        func shifted<T>(_ dict: [Int: T]) -> [Int: T] {
+            var result: [Int: T] = [:]
+            for (key, value) in dict {
+                if key == frame { continue }
+                result[key > frame ? key - 1 : key] = value
+            }
+            return result
+        }
+        layer.frameScripts = shifted(layer.frameScripts)
+        layer.textFrames = shifted(layer.textFrames)
+        layer.symbolFrames = shifted(layer.symbolFrames)
+        layer.shapeFrames = shifted(layer.shapeFrames)
+        layer.groupFrames = shifted(layer.groupFrames)
+        layer.frameLabels = shifted(layer.frameLabels)
+        layer.tweenSettings = shifted(layer.tweenSettings)
+        layer.colorTweenSettings = shifted(layer.colorTweenSettings)
+    }
+
+    /// F5 in classic Flash — inserts a frame at `frame` on `layer`. Two
+    /// cases, matching what F5 has always meant in Flaj plus what the
+    /// audit found missing:
+    ///  - Nothing at or after `frame` yet (the common case: jumping ahead
+    ///    on an otherwise-empty layer): bridges the whole gap back to the
+    ///    nearest keyframe with continuation frames, same convenience
+    ///    Flaj has always had here (see `extendSpan`) — there's nothing
+    ///    to shift since it's all `.empty` anyway.
+    ///  - Real content already sits at or after `frame`: a true insert,
+    ///    shifting that keyframe (and its content/scripts/labels/tweens)
+    ///    and everything after it one frame later, the way Flash's own
+    ///    Insert Frame actually works. Scoped to this one layer, matching
+    ///    Flash's own behavior when only a single layer's frame cell is
+    ///    selected (a synchronized whole-timeline insert across every
+    ///    layer at once isn't implemented).
     func insertFrame(layer: TLLayer, at frame: Int) {
+        guard frame >= 1 else { return }
         withUndoSnapshot {
             growCapacity(to: max(totalFrames, frame))
-            let idx = frame - 1
-            guard layer.frames.indices.contains(idx), layer.frames[idx] == .empty else { return }
-            extendSpan(layer: layer, upTo: frame)
-            if layer.frames[idx] == .empty { layer.frames[idx] = .plain } // no preceding keyframe to bridge from
+            let hasContentAtOrAfter = layer.frames[(frame - 1)...].contains { $0 != .empty }
+            if !hasContentAtOrAfter {
+                extendSpan(layer: layer, upTo: frame)
+                if layer.frames[frame - 1] == .empty { layer.frames[frame - 1] = .plain }
+                return
+            }
+            let continuing = frame > 1 && layer.governingKeyframe(at: frame - 1) != nil
+            layer.frames.insert(continuing ? .plain : .empty, at: frame - 1)
+            shiftFrameContentKeysForInsert(layer: layer, at: frame)
+            // This layer is now one frame longer than every other — pad
+            // the rest and widen the document's own frame count to match,
+            // same as Flash showing a longer layer's own row extend the
+            // whole ruler.
+            growCapacity(to: layer.frames.count)
+        }
+    }
+
+    /// Shift+F5 in classic Flash — removes the frame at `frame` on `layer`,
+    /// shifting every later keyframe (and its content/scripts/labels/
+    /// tweens) one frame earlier. Scoped to this one layer, same as
+    /// `insertFrame`. Distinct from Clear Frame (`clearFrame` below), which
+    /// empties a frame's content in place without moving anything else —
+    /// Flash keeps these as two separate commands, and so does Flaj.
+    func removeFrames(layer: TLLayer, at frame: Int) {
+        let idx = frame - 1
+        guard layer.frames.indices.contains(idx) else { return }
+        withUndoSnapshot {
+            layer.frames.remove(at: idx)
+            layer.frames.append(.empty) // keeps this layer's length == totalFrames
+            shiftFrameContentKeysForRemove(layer: layer, at: frame)
+            if selectedLayerID == layer.id, selectedFrame > frame {
+                selectedFrame -= 1
+            }
         }
     }
 
@@ -2404,12 +2612,14 @@ final class TimelineDocument {
         }
     }
 
-    /// Shift+F5 in classic Flash — removes frames. Removing a keyframe that
-    /// sits exactly between two tweens (one ending here, another starting
-    /// here — e.g. the shared frame left by splitting a tween via Insert
-    /// Keyframe) merges them into a single tween spanning the gap, with the
-    /// removed keyframe's own content excluded, rather than leaving a blank
-    /// hole that breaks both.
+    /// Clear Frame(s)/Clear Keyframe in classic Flash — empties a frame's
+    /// content in place without moving anything else on the layer (see
+    /// `removeFrames` above for Shift+F5, which does shift). Removing a
+    /// keyframe that sits exactly between two tweens (one ending here,
+    /// another starting here — e.g. the shared frame left by splitting a
+    /// tween via Insert Keyframe) merges them into a single tween spanning
+    /// the gap, with the removed keyframe's own content excluded, rather
+    /// than leaving a blank hole that breaks both.
     func clearFrame(layer: TLLayer, at frame: Int) {
         let idx = frame - 1
         guard layer.frames.indices.contains(idx) else { return }
@@ -2461,6 +2671,11 @@ final class TimelineDocument {
     func clearFrameAtSelection() {
         guard let layer = selectedLayer else { return }
         clearFrame(layer: layer, at: playhead)
+    }
+
+    func removeFramesAtSelection() {
+        guard let layer = selectedLayer else { return }
+        removeFrames(layer: layer, at: playhead)
     }
 
     /// Reorders `id` to sit directly above `beforeLayerID` (or the end of the

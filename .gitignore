@@ -5,3 +5,4 @@ Flaj.app/
 .DS_Store
 .swiftpm/
 .idea
+*.pdf

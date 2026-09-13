@@ -6,6 +6,13 @@ let frameWidth: CGFloat = 8
 let layerPanelWidth: CGFloat = 190
 let layerIconColWidth: CGFloat = 18
 
+/// The thin horizontal rule Flash draws between every layer row — shared by
+/// `LayerRowView` and `FrameRowView` so the line lands at the same height
+/// in both the layer-name panel and the frame grid beside it.
+var layerRowDivider: some View {
+    Rectangle().fill(Color.secondary.opacity(0.15)).frame(height: 1)
+}
+
 struct TimelineView: View {
     @Bindable var doc: TimelineDocument
 
@@ -136,9 +143,24 @@ struct TimelineView: View {
                 }
                 .buttonStyle(.plain)
 
-                TextField("", value: $doc.playhead, formatter: NumberFormatter())
+                // Deliberately `text:`, not `value:formatter:` — every
+                // variant of the value/formatter initializer tried here
+                // (fresh NumberFormatter() per render, one shared static
+                // instance, a hand-built Binding instead of `$doc.playhead`)
+                // still left this field permanently rendered as if it were
+                // being edited, even with nothing in the window actually
+                // focused (confirmed via the accessibility tree). A plain
+                // text Binding with manual Int parsing doesn't have
+                // whatever internal state `value:formatter:` was getting
+                // stuck in, and behaves identically for the user.
+                TextField("", text: Binding(
+                    get: { String(doc.playhead) },
+                    set: { if let v = Int($0) { doc.playhead = v } }
+                ))
                     .frame(width: 34)
                     .textFieldStyle(.roundedBorder)
+                    .controlSize(.small)
+                    .focusEffectDisabled()
 
                 Text(String(format: "%.1fs", doc.elapsedSeconds))
                     .font(.system(size: 10)).foregroundStyle(.secondary)
@@ -273,6 +295,7 @@ struct LayerRowView: View {
         .frame(height: rowHeight)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(isDropTarget ? Color.accentColor.opacity(0.35) : (isSelected ? Color.accentColor.opacity(0.25) : Color.clear))
+        .overlay(alignment: .bottom) { layerRowDivider }
         .contentShape(Rectangle())
         .simultaneousGesture(TapGesture().onEnded { doc.selectedLayerID = layer.id })
         .onDrag {
@@ -409,12 +432,14 @@ struct FrameRowView: View {
         // tween's end keyframe — lets each cell know whether (and how far
         // back) it's allowed to be dragged.
         let tweenEndStarts: [Int: Int] = Dictionary(uniqueKeysWithValues: tweenSpans.map { ($0.end, $0.start) })
+        let spanKinds = tweenSpanKinds
 
         ZStack(alignment: .topLeading) {
             HStack(spacing: 0) {
                 ForEach(0..<frameCount, id: \.self) { i in
                     FrameCellSlot(doc: doc, layer: layer, frame: i + 1, columnIndex: i,
-                                  tweenEndStart: tweenEndStarts[i + 1], dropTargetFrame: $tweenDragTargetFrame)
+                                  tweenEndStart: tweenEndStarts[i + 1], tweenKind: spanKinds[i + 1],
+                                  dropTargetFrame: $tweenDragTargetFrame)
                 }
             }
             tweenArrows
@@ -427,6 +452,7 @@ struct FrameRowView: View {
                 .frame(width: 1, height: rowHeight)
                 .offset(x: CGFloat(doc.playhead - 1) * frameWidth + frameWidth / 2 - 0.5)
         }
+        .overlay(alignment: .bottom) { layerRowDivider }
     }
 
     /// Every `.tween` run on this layer, as the (start, end) keyframes that
@@ -444,28 +470,53 @@ struct FrameRowView: View {
         return spans
     }
 
+    /// Every frame inside a tween span, mapped to whether that span is
+    /// tweening a shape (Flash's green-tinted "shape tween") or anything
+    /// else (Flash's blue "motion tween") — Flaj's four content dictionaries
+    /// are strictly mutually exclusive per keyframe, so checking
+    /// `shapeFrames` at the span's start keyframe is enough to tell them
+    /// apart.
+    private var tweenSpanKinds: [Int: TweenSpanKind] {
+        var kinds: [Int: TweenSpanKind] = [:]
+        for span in tweenSpans {
+            let kind: TweenSpanKind = layer.shapeFrames[span.start] != nil ? .shape : .motion
+            for f in span.start...span.end { kinds[f] = kind }
+        }
+        return kinds
+    }
+
     /// Every labeled keyframe on this layer, sorted so the flags always
     /// draw left to right regardless of `frameLabels`' (unspecified)
     /// dictionary iteration order.
-    private var labeledFrames: [(frame: Int, text: String)] {
-        layer.frameLabels.sorted { $0.key < $1.key }.map { (frame: $0.key, text: $0.value) }
+    private var labeledFrames: [(frame: Int, label: FrameLabel)] {
+        layer.frameLabels.sorted { $0.key < $1.key }.map { (frame: $0.key, label: $0.value) }
     }
 
-    /// A small red flag + the label text, Flash's own frame-label glyph —
-    /// anchored at the labeled frame's left edge and allowed to overflow
-    /// into the cells after it (there's no room for real text in an 8pt
-    /// frame column), same as `tweenArrows`' decorative overlay.
+    /// Flash's own frame-label glyphs — a red flag for a Name, a small
+    /// anchor for an Anchor, and (unlike Flash, which draws these as a
+    /// literal "//") a dimmed comment-bubble icon for a Comment, since a
+    /// 6pt "//" doesn't read at this scale. Anchored at the labeled frame's
+    /// left edge and allowed to overflow into the cells after it (there's
+    /// no room for real text in an 8pt frame column), same as
+    /// `tweenArrows`' decorative overlay.
     private var frameLabelFlags: some View {
         ForEach(labeledFrames, id: \.frame) { item in
             HStack(spacing: 2) {
-                Image(systemName: "flag.fill")
-                    .font(.system(size: 6))
-                    .foregroundStyle(.red)
-                Text(item.text)
+                switch item.label.type {
+                case .name:
+                    Image(systemName: "flag.fill").foregroundStyle(.red)
+                case .anchor:
+                    Image(systemName: "anchor").foregroundStyle(.blue)
+                case .comment:
+                    Image(systemName: "text.bubble.fill").foregroundStyle(.secondary)
+                }
+                Text(item.label.text)
                     .font(.system(size: 8))
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(item.label.type == .comment ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+                    .italic(item.label.type == .comment)
                     .fixedSize()
             }
+            .font(.system(size: 6))
             .offset(x: CGFloat(item.frame - 1) * frameWidth + 2, y: 1)
         }
     }
@@ -516,6 +567,9 @@ private struct FrameCellSlot: View {
     /// tween's end keyframe — the one thing that's draggable, and only to
     /// frames after that start.
     let tweenEndStart: Int?
+    /// Non-nil exactly when `mark` is `.tween` — which color Flash would
+    /// tint this span's band (see `TweenSpanKind`).
+    let tweenKind: TweenSpanKind?
     /// Owned by the parent FrameRowView, shared by every cell in this row —
     /// which frame a tween-end drag in progress would land on, so the
     /// destination cell (a different FrameCellSlot instance than the one
@@ -539,7 +593,8 @@ private struct FrameCellSlot: View {
             columnIndex: columnIndex,
             dimmed: layer.hidden,
             isSelected: doc.hasSelectedFrame && doc.selectedLayerID == layer.id && doc.selectedFrameRange.contains(frame),
-            isDropTarget: isDropTarget
+            isDropTarget: isDropTarget,
+            tweenKind: tweenKind
         )
         .frame(width: frameWidth, height: rowHeight)
         .contentShape(Rectangle())
@@ -564,6 +619,7 @@ private struct FrameCellSlot: View {
             Button("Insert Keyframe") { doc.insertKeyframe(layer: layer, at: frame, blank: false) }
             Button("Insert Blank Keyframe") { doc.insertKeyframe(layer: layer, at: frame, blank: true) }
             Divider()
+            Button("Remove Frames", role: .destructive) { doc.removeFrames(layer: layer, at: frame) }
             Button("Clear Frame", role: .destructive) { doc.clearFrame(layer: layer, at: frame) }
             Divider()
             Button("Create Tween") {
@@ -584,10 +640,16 @@ private struct FrameCellSlot: View {
             }
             .disabled(layer.textFrames[frame] == nil)
             Divider()
+            Button("Cut Frames") { doc.cutSelectedFrames() }
+                .disabled(doc.selectedLayerID != layer.id)
             Button("Copy Frames") { doc.copySelectedFrames() }
                 .disabled(doc.selectedLayerID != layer.id)
             Button("Paste Frames") { doc.pasteFrames(layer: layer, at: frame) }
                 .disabled(!doc.hasCopiedFrames)
+            Button("Select All Frames") { doc.selectAllFrames() }
+            Divider()
+            Button("Reverse Frames") { doc.reverseFrames(layer: layer, range: doc.selectedFrameRange) }
+                .disabled(doc.selectedLayerID != layer.id || doc.selectedFrameRange.count < 2)
         }
     }
 
@@ -640,6 +702,14 @@ private struct FrameCellSlot: View {
     }
 }
 
+/// Which color Flash tints a tween span's band with — blue for a motion
+/// tween (anything but a shape: text, symbol, or group), green for a shape
+/// tween.
+enum TweenSpanKind {
+    case motion
+    case shape
+}
+
 struct FrameCellView: View {
     let mark: FrameMark
     let columnIndex: Int
@@ -650,10 +720,16 @@ struct FrameCellView: View {
     /// distinctly from plain selection so "here's where it's going" reads
     /// at a glance while dragging.
     var isDropTarget: Bool = false
+    /// Only meaningful when `mark == .tween` — nil elsewhere.
+    var tweenKind: TweenSpanKind? = nil
 
     private var bandColor: Color {
         switch mark {
-        case .tween: return Color(red: 0.72, green: 0.65, blue: 0.95).opacity(0.55)
+        case .tween:
+            switch tweenKind {
+            case .shape: return Color(red: 0.6, green: 0.85, blue: 0.6).opacity(0.55)
+            case .motion, .none: return Color(red: 0.6, green: 0.75, blue: 0.95).opacity(0.55)
+            }
         case .plain, .spanEnd: return Color.gray.opacity(0.12)
         default: return (columnIndex / 5) % 2 == 0 ? Color.gray.opacity(0.04) : Color.clear
         }
@@ -678,12 +754,23 @@ struct FrameCellView: View {
             case .keyframe(let hasScript):
                 Circle().fill(Color.primary).frame(width: 5, height: 5)
                 if hasScript {
-                    Circle().stroke(Color.orange, lineWidth: 1).frame(width: 7, height: 7).offset(y: -6)
+                    // Flash marks a frame carrying an action with a small
+                    // italic "a", not a colored ring.
+                    Text("a")
+                        .font(.system(size: 7, weight: .semibold, design: .serif))
+                        .italic()
+                        .foregroundStyle(Color.primary)
+                        .offset(y: -6)
                 }
             case .emptyKeyframe:
                 Circle().stroke(Color.primary, lineWidth: 1).frame(width: 5, height: 5)
             case .spanEnd:
-                Circle().stroke(Color.primary.opacity(0.6), lineWidth: 1).frame(width: 4, height: 4)
+                // Flash's own endframe glyph: a small hollow rectangle plus
+                // a vertical line marking the end of the frame sequence,
+                // not a circle.
+                Rectangle().stroke(Color.primary.opacity(0.7), lineWidth: 1).frame(width: 6, height: 6)
+                Rectangle().fill(Color.primary.opacity(0.7)).frame(width: 1.5)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
             case .tween, .plain, .empty:
                 EmptyView()
             }

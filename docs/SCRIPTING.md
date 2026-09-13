@@ -58,6 +58,12 @@ whichever layers happen to have the relevant keyframes. Calling with a
 label that doesn't exist anywhere logs a console warning and leaves the
 playhead where it was — it doesn't jump to frame 0 or throw.
 
+Every label also has a Type, next to the text field in the Properties
+panel: Name (the default, addressable as above), Comment (documentation
+only — excluded from this lookup entirely, so `gotoAndPlay`/`gotoAndStop`/
+`goto` can never land on one, matching Flash not compiling comments into
+anything addressable), or Anchor (see below).
+
 A label starting with `#` doubles as a deep link in the exported web
 page — the moment the playhead actually reaches that frame, the page's URL
 fragment updates to match, becoming a real, back/forward-navigable browser
@@ -65,7 +71,8 @@ history entry. Opening the exported page with a URL that already ends in a
 matching `#label` starts there instead of frame 1. Native-app-only
 playback (no exported page to have a URL) ignores this — a `#`-prefixed
 label works everywhere `gotoAndStop('#menu')` would, it just doesn't do
-anything extra outside the browser.
+anything extra outside the browser. Setting a label's Type to Anchor in
+the Properties panel just adds/removes this leading `#` for you.
 
 ## Stage
 

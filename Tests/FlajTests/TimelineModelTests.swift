@@ -198,7 +198,7 @@ final class TimelineModelTests: XCTestCase {
         )
         layer.frameScripts[1] = "trace('hi');"
         layer.textFrames[1] = PlacedText(text: "A", x: 1, y: 2, width: 10, height: 10)
-        layer.frameLabels[1] = "start"
+        layer.frameLabels[1] = FrameLabel(text: "start")
         let doc = TimelineDocument(layers: [layer], totalFrames: 5)
 
         doc.moveKeyframe(layer: layer, from: 1, to: 5)
@@ -206,7 +206,7 @@ final class TimelineModelTests: XCTestCase {
         XCTAssertEqual(layer.frames[4], .keyframe(hasScript: true))
         XCTAssertEqual(layer.frameScripts[5], "trace('hi');")
         XCTAssertEqual(layer.textFrames[5]?.text, "A")
-        XCTAssertEqual(layer.frameLabels[5], "start")
+        XCTAssertEqual(layer.frameLabels[5]?.text, "start")
 
         // The old position, and the `.plain` span it used to govern, are
         // both cleared rather than left as dangling/ungoverned marks.
@@ -279,6 +279,159 @@ final class TimelineModelTests: XCTestCase {
         // not a dangling `.plain` mark with nothing behind it.
         XCTAssertEqual(layer.governingKeyframe(at: 10), 1)
         XCTAssertEqual(layer.interpolatedPlacedText(at: 10)?.text, "Hi")
+    }
+
+    /// The audit-flagged gap this fills: F5 pressed where there's real
+    /// content later on the layer must shift that content forward instead
+    /// of silently doing nothing (the old guard required the target cell
+    /// to already be `.empty`).
+    func testInsertFrameShiftsALaterKeyframeAndItsContentForward() {
+        let layer = TLLayer(name: "text", swatch: .green, frames: [.keyframe(hasScript: false), .plain, .keyframe(hasScript: false)])
+        layer.textFrames[1] = PlacedText(text: "A", x: 0, y: 0, width: 10, height: 10)
+        layer.textFrames[3] = PlacedText(text: "B", x: 0, y: 0, width: 10, height: 10)
+        layer.frameLabels[3] = FrameLabel(text: "end")
+        let doc = TimelineDocument(layers: [layer], totalFrames: 3)
+
+        doc.insertFrame(layer: layer, at: 2)
+
+        XCTAssertEqual(layer.frames, [.keyframe(hasScript: false), .plain, .plain, .keyframe(hasScript: false)])
+        XCTAssertEqual(layer.textFrames[1]?.text, "A", "content before the insertion point stays put")
+        XCTAssertNil(layer.textFrames[3], "the old frame 3 content moved to frame 4")
+        XCTAssertEqual(layer.textFrames[4]?.text, "B")
+        XCTAssertEqual(layer.frameLabels[4]?.text, "end")
+        XCTAssertEqual(doc.totalFrames, 4, "the layer grew, so the document's own frame count follows")
+    }
+
+    func testInsertFrameShiftingPadsEveryOtherLayerToStayTheSameLength() {
+        let a = TLLayer(name: "a", swatch: .green, frames: [.keyframe(hasScript: false), .plain, .keyframe(hasScript: false)])
+        let b = TLLayer(name: "b", swatch: .blue, frames: [.keyframe(hasScript: false), .plain, .plain])
+        let doc = TimelineDocument(layers: [a, b], totalFrames: 3)
+
+        doc.insertFrame(layer: a, at: 2)
+
+        XCTAssertEqual(a.frames.count, 4)
+        XCTAssertEqual(b.frames.count, 4, "every layer stays the same length as the document's own frame count")
+        XCTAssertEqual(b.frames[3], .empty, "the padding on an untouched layer is genuinely empty, not a continuation")
+    }
+
+    func testRemoveFramesShiftsLaterContentBackAndDropsTheRemovedFramesOwnContent() {
+        let layer = TLLayer(name: "text", swatch: .green, frames: [.keyframe(hasScript: false), .plain, .keyframe(hasScript: false)])
+        layer.textFrames[1] = PlacedText(text: "A", x: 0, y: 0, width: 10, height: 10)
+        layer.textFrames[3] = PlacedText(text: "B", x: 0, y: 0, width: 10, height: 10)
+        let doc = TimelineDocument(layers: [layer], totalFrames: 3)
+
+        doc.removeFrames(layer: layer, at: 2)
+
+        XCTAssertEqual(layer.frames, [.keyframe(hasScript: false), .keyframe(hasScript: false), .empty])
+        XCTAssertEqual(layer.textFrames[1]?.text, "A")
+        XCTAssertEqual(layer.textFrames[2]?.text, "B", "the old frame 3 content moved back to frame 2")
+        XCTAssertEqual(layer.frames.count, 3, "removing pads the tail back to the document's frame count rather than shrinking it")
+    }
+
+    func testRemoveFramesDropsTheRemovedKeyframesOwnContentEvenThoughNothingIsAfterIt() {
+        let layer = TLLayer(name: "text", swatch: .green, frames: [.keyframe(hasScript: false), .keyframe(hasScript: false)])
+        layer.textFrames[1] = PlacedText(text: "A", x: 0, y: 0, width: 10, height: 10)
+        layer.textFrames[2] = PlacedText(text: "B", x: 0, y: 0, width: 10, height: 10)
+        let doc = TimelineDocument(layers: [layer], totalFrames: 2)
+
+        doc.removeFrames(layer: layer, at: 2)
+
+        XCTAssertNil(layer.textFrames[2], "frame 2's own content is gone, not shifted onto itself")
+        XCTAssertEqual(layer.textFrames[1]?.text, "A")
+    }
+
+    /// `insertFrame` grows the document's own `totalFrames` when this layer
+    /// becomes the longest one — `removeFrames` deliberately doesn't shrink
+    /// it back (see its own doc comment), so the round trip restores the
+    /// original *content* but leaves the document one frame longer, with a
+    /// genuinely empty tail rather than shrinking the timeline back down.
+    func testInsertFrameThenRemoveFramesRestoresContentButNotTheFrameCount() {
+        let layer = TLLayer(name: "text", swatch: .green, frames: [.keyframe(hasScript: false), .plain, .keyframe(hasScript: false)])
+        layer.textFrames[1] = PlacedText(text: "A", x: 0, y: 0, width: 10, height: 10)
+        layer.textFrames[3] = PlacedText(text: "B", x: 0, y: 0, width: 10, height: 10)
+        let doc = TimelineDocument(layers: [layer], totalFrames: 3)
+
+        doc.insertFrame(layer: layer, at: 2)
+        doc.removeFrames(layer: layer, at: 2)
+
+        XCTAssertEqual(layer.frames, [.keyframe(hasScript: false), .plain, .keyframe(hasScript: false), .empty])
+        XCTAssertEqual(layer.textFrames[1]?.text, "A")
+        XCTAssertEqual(layer.textFrames[3]?.text, "B")
+        XCTAssertEqual(doc.totalFrames, 4)
+    }
+
+    func testSelectAllFramesSelectsTheWholeLayerAsOneRange() {
+        let layer = TLLayer(name: "text", swatch: .green, frames: Array(repeating: .empty, count: 5))
+        let doc = TimelineDocument(layers: [layer], totalFrames: 5)
+        doc.selectedLayerID = layer.id
+
+        doc.selectAllFrames()
+
+        XCTAssertTrue(doc.hasSelectedFrame)
+        XCTAssertEqual(doc.selectedFrameRange, 1...5)
+    }
+
+    func testReverseFramesMirrorsMarksAndContentAroundTheRangeCenter() {
+        let layer = TLLayer(name: "text", swatch: .green, frames: [.keyframe(hasScript: false), .plain, .keyframe(hasScript: false)])
+        layer.textFrames[1] = PlacedText(text: "A", x: 0, y: 0, width: 10, height: 10)
+        layer.textFrames[3] = PlacedText(text: "B", x: 0, y: 0, width: 10, height: 10)
+        let doc = TimelineDocument(layers: [layer], totalFrames: 3)
+
+        doc.reverseFrames(layer: layer, range: 1...3)
+
+        XCTAssertEqual(layer.frames, [.keyframe(hasScript: false), .plain, .keyframe(hasScript: false)], "the mark shape at the middle/ends is symmetric here, so it reads the same reversed")
+        XCTAssertEqual(layer.textFrames[1]?.text, "B", "content at the two ends swapped")
+        XCTAssertEqual(layer.textFrames[3]?.text, "A")
+    }
+
+    /// A tween's easing stays keyed at the span's start position — reversal
+    /// only swaps which content sits at each end, so the same curve now
+    /// runs from the old end's content to the old start's.
+    func testReverseFramesLeavesATweensEasingAtTheSpansStartPosition() {
+        let layer = TLLayer(name: "text", swatch: .green, frames: [.keyframe(hasScript: false), .tween, .keyframe(hasScript: false)])
+        layer.textFrames[1] = PlacedText(text: "A", x: 0, y: 0, width: 10, height: 10)
+        layer.textFrames[3] = PlacedText(text: "B", x: 0, y: 0, width: 10, height: 10)
+        layer.tweenSettings[1] = TweenSettings(family: .quad, direction: .easeOut, amount: 100)
+        let doc = TimelineDocument(layers: [layer], totalFrames: 3)
+
+        doc.reverseFrames(layer: layer, range: 1...3)
+
+        XCTAssertNil(layer.tweenSettings[3], "the span's start is still frame 1, not wherever its old content moved to")
+        XCTAssertEqual(layer.tweenSettings[1]?.family, .quad, "same easing curve, untouched by the content swap")
+        XCTAssertEqual(layer.textFrames[1]?.text, "B", "frame 1 now shows what used to be at the end")
+        XCTAssertEqual(layer.textFrames[3]?.text, "A")
+    }
+
+    func testReverseFramesIsANoOpOnASingleFrameRange() {
+        let layer = TLLayer(name: "text", swatch: .green, frames: [.keyframe(hasScript: false)])
+        layer.textFrames[1] = PlacedText(text: "A", x: 0, y: 0, width: 10, height: 10)
+        let doc = TimelineDocument(layers: [layer], totalFrames: 1)
+
+        doc.reverseFrames(layer: layer, range: 1...1)
+        XCTAssertEqual(layer.textFrames[1]?.text, "A")
+    }
+
+    func testCutSelectedFramesCopiesThenClearsInPlaceWithoutShifting() {
+        let layer = TLLayer(name: "text", swatch: .green, frames: [.keyframe(hasScript: false), .plain, .keyframe(hasScript: false)])
+        layer.textFrames[1] = PlacedText(text: "A", x: 0, y: 0, width: 10, height: 10)
+        layer.textFrames[3] = PlacedText(text: "B", x: 0, y: 0, width: 10, height: 10)
+        let doc = TimelineDocument(layers: [layer], totalFrames: 3)
+        doc.selectedLayerID = layer.id
+        doc.selectFrame(layer: layer, frame: 1, extend: false)
+        doc.selectFrame(layer: layer, frame: 3, extend: true)
+
+        doc.cutSelectedFrames()
+
+        XCTAssertTrue(doc.hasCopiedFrames, "Cut Frames copies before clearing")
+        XCTAssertEqual(layer.frames, [.empty, .empty, .empty], "cleared in place, not shifted")
+        XCTAssertNil(layer.textFrames[1])
+        XCTAssertNil(layer.textFrames[3])
+
+        let dest = TLLayer(name: "dest", swatch: .blue, frames: Array(repeating: .empty, count: 3))
+        doc.layers.append(dest)
+        doc.pasteFrames(layer: dest, at: 1)
+        XCTAssertEqual(dest.textFrames[1]?.text, "A", "the cut content is still pasteable afterward")
+        XCTAssertEqual(dest.textFrames[3]?.text, "B")
     }
 
     func testColorEasingIsIndependentOfPositionEasing() {
