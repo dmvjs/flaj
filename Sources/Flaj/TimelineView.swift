@@ -594,7 +594,8 @@ private struct FrameCellSlot: View {
             dimmed: layer.hidden,
             isSelected: doc.hasSelectedFrame && doc.selectedLayerID == layer.id && doc.selectedFrameRange.contains(frame),
             isDropTarget: isDropTarget,
-            tweenKind: tweenKind
+            tweenKind: tweenKind,
+            isPropertyKeyframe: layer.isPropertyKeyframe(at: frame)
         )
         .frame(width: frameWidth, height: rowHeight)
         .contentShape(Rectangle())
@@ -629,6 +630,12 @@ private struct FrameCellSlot: View {
             .disabled(doc.selectedLayerID != layer.id || doc.selectedFrameRange.count < 2)
             Button("Remove Tween") { doc.removeTween(layer: layer, at: frame) }
                 .disabled(layer.governingKeyframe(at: frame).flatMap { layer.tweenTarget(from: $0) } == nil)
+            if layer.isPropertyKeyframe(at: frame) {
+                Button("Remove Property Keyframe") { doc.removePropertyKeyframe(layer: layer, at: frame) }
+            } else {
+                Button("Add Property Keyframe") { doc.addPropertyKeyframe(layer: layer, at: frame) }
+                    .disabled(frame - 1 >= layer.frames.count || layer.frames[frame - 1] != .tween)
+            }
             Divider()
             Button("Copy Text") { doc.copySelectedPlacement() }
                 .disabled(doc.selectedPlacement == nil)
@@ -722,6 +729,9 @@ struct FrameCellView: View {
     var isDropTarget: Bool = false
     /// Only meaningful when `mark == .tween` — nil elsewhere.
     var tweenKind: TweenSpanKind? = nil
+    /// True on a `.tween` frame carrying a property keyframe (see
+    /// `TLLayer.isPropertyKeyframe`) — Flash's diamond marker.
+    var isPropertyKeyframe: Bool = false
 
     private var bandColor: Color {
         switch mark {
@@ -771,7 +781,17 @@ struct FrameCellView: View {
                 Rectangle().stroke(Color.primary.opacity(0.7), lineWidth: 1).frame(width: 6, height: 6)
                 Rectangle().fill(Color.primary.opacity(0.7)).frame(width: 1.5)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
-            case .tween, .plain, .empty:
+            case .tween:
+                if isPropertyKeyframe {
+                    // Flash's diamond marker — a mid-span checkpoint the
+                    // eased curve re-targets through, distinct from a full
+                    // keyframe's round dot.
+                    Rectangle()
+                        .fill(Color.primary)
+                        .frame(width: 5, height: 5)
+                        .rotationEffect(.degrees(45))
+                }
+            case .plain, .empty:
                 EmptyView()
             }
         }

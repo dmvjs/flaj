@@ -185,15 +185,50 @@ final class TLLayer: Identifiable {
         return nil
     }
 
+    /// True on a `.tween` frame that carries its own content snapshot — a
+    /// "property keyframe" (Flash's diamond marker): a lightweight mid-span
+    /// checkpoint the eased curve re-targets through, without splitting the
+    /// span into two separate tweens the way Insert Keyframe would. Stored
+    /// in the exact same dictionaries a real keyframe's content lives in
+    /// (`textFrames`/`symbolFrames`/`shapeFrames`) — the only thing that
+    /// makes it a property keyframe rather than a full one is that
+    /// `frames[frame - 1]` is still `.tween`, not `.keyframe`.
+    func isPropertyKeyframe(at frame: Int) -> Bool {
+        guard frames.indices.contains(frame - 1), case .tween = frames[frame - 1] else { return false }
+        return textFrames[frame] != nil || symbolFrames[frame] != nil || shapeFrames[frame] != nil
+    }
+
+    /// The two checkpoints in `dict` (a span's start/end keyframes, plus
+    /// any property keyframes at intermediate `.tween` frames) that bracket
+    /// `frame` — what every interpolation function below eases between,
+    /// instead of always the span's two endpoints. Landing exactly on a
+    /// checkpoint returns it as both ends (an interpolation with `lo == hi`
+    /// degenerates to that value regardless of `t`). nil only if `kf`/
+    /// `endKf` themselves have no content, which callers already guard.
+    private func checkpointBracket<T>(_ dict: [Int: T], from kf: Int, to endKf: Int, at frame: Int) -> (loFrame: Int, lo: T, hiFrame: Int, hi: T)? {
+        let checkpoints = dict.keys.filter { $0 >= kf && $0 <= endKf }.sorted()
+        guard let first = checkpoints.first, let last = checkpoints.last else { return nil }
+        if frame <= first { return (first, dict[first]!, first, dict[first]!) }
+        if frame >= last { return (last, dict[last]!, last, dict[last]!) }
+        for i in 0..<(checkpoints.count - 1) {
+            let lo = checkpoints[i], hi = checkpoints[i + 1]
+            if frame >= lo && frame <= hi { return (lo, dict[lo]!, hi, dict[hi]!) }
+        }
+        return nil
+    }
+
     /// What's actually showing at `frame` — the governing keyframe's
     /// PlacedText as-is for a plain span, or eased-interpolated toward the
-    /// tween's end keyframe for a tween span. nil if there's no content at
-    /// `frame` at all. Single source of truth shared by StagePlacedTextView
-    /// (live rendering) and insertKeyframe (snapshotting a mid-tween split).
+    /// tween's end keyframe for a tween span (passing through any property
+    /// keyframes in between — see `checkpointBracket`). nil if there's no
+    /// content at `frame` at all. Single source of truth shared by
+    /// StagePlacedTextView (live rendering) and insertKeyframe (snapshotting
+    /// a mid-tween split).
     func interpolatedPlacedText(at frame: Int) -> PlacedText? {
         guard let kf = governingKeyframe(at: frame), let base = textFrames[kf] else { return nil }
-        guard let endKf = tweenTarget(from: kf), let end = textFrames[endKf], endKf > kf else { return base }
-        let rawT = Double(frame - kf) / Double(endKf - kf)
+        guard let endKf = tweenTarget(from: kf), textFrames[endKf] != nil, endKf > kf,
+              let (loFrame, base, hiFrame, end) = checkpointBracket(textFrames, from: kf, to: endKf, at: frame) else { return base }
+        let rawT = hiFrame > loFrame ? Double(frame - loFrame) / Double(hiFrame - loFrame) : 0
         let t = (tweenSettings[kf] ?? TweenSettings()).easedProgress(rawT)
         let colorT = (colorTweenSettings[kf] ?? TweenSettings()).easedProgress(rawT)
         var result = base
@@ -215,8 +250,9 @@ final class TLLayer: Identifiable {
     /// already are.
     func interpolatedSymbolInstance(at frame: Int) -> SymbolInstance? {
         guard let kf = governingKeyframe(at: frame), let base = symbolFrames[kf] else { return nil }
-        guard let endKf = tweenTarget(from: kf), let end = symbolFrames[endKf], endKf > kf else { return base }
-        let rawT = Double(frame - kf) / Double(endKf - kf)
+        guard let endKf = tweenTarget(from: kf), symbolFrames[endKf] != nil, endKf > kf,
+              let (loFrame, base, hiFrame, end) = checkpointBracket(symbolFrames, from: kf, to: endKf, at: frame) else { return base }
+        let rawT = hiFrame > loFrame ? Double(frame - loFrame) / Double(hiFrame - loFrame) : 0
         let t = (tweenSettings[kf] ?? TweenSettings()).easedProgress(rawT)
         let colorT = (colorTweenSettings[kf] ?? TweenSettings()).easedProgress(rawT)
         var result = base
@@ -238,8 +274,9 @@ final class TLLayer: Identifiable {
     /// doesn't morph into an ellipse mid-tween).
     func interpolatedPlacedShape(at frame: Int) -> PlacedShape? {
         guard let kf = governingKeyframe(at: frame), let base = shapeFrames[kf] else { return nil }
-        guard let endKf = tweenTarget(from: kf), let end = shapeFrames[endKf], endKf > kf else { return base }
-        let rawT = Double(frame - kf) / Double(endKf - kf)
+        guard let endKf = tweenTarget(from: kf), shapeFrames[endKf] != nil, endKf > kf,
+              let (loFrame, base, hiFrame, end) = checkpointBracket(shapeFrames, from: kf, to: endKf, at: frame) else { return base }
+        let rawT = hiFrame > loFrame ? Double(frame - loFrame) / Double(hiFrame - loFrame) : 0
         let t = (tweenSettings[kf] ?? TweenSettings()).easedProgress(rawT)
         let colorT = (colorTweenSettings[kf] ?? TweenSettings()).easedProgress(rawT)
         var result = base
@@ -1728,15 +1765,53 @@ final class TimelineDocument {
     /// Reverts a tween span back to plain frames, keeping both keyframes
     /// and their content intact — unlike Clear Frame, which wipes the frame
     /// (and its content) entirely. A no-op if `frame` isn't governed by an
-    /// active tween.
+    /// active tween. Also drops any property keyframes inside the span —
+    /// a `.plain` span never consults mid-span content (see
+    /// `interpolatedPlacedText`'s plain-span path), so they'd otherwise
+    /// linger as dead data a re-tween of the same range could confusingly
+    /// resurrect.
     func removeTween(layer: TLLayer, at frame: Int) {
         guard let start = layer.governingKeyframe(at: frame), let end = layer.tweenTarget(from: start) else { return }
         withUndoSnapshot {
             for f in (start + 1)..<end {
                 layer.frames[f - 1] = .plain
+                layer.textFrames[f] = nil
+                layer.symbolFrames[f] = nil
+                layer.shapeFrames[f] = nil
             }
             layer.tweenSettings[start] = nil
             layer.colorTweenSettings[start] = nil
+        }
+    }
+
+    /// Add Property Keyframe (Flash's diamond marker) — captures what's
+    /// currently interpolating at `frame` into that content dictionary in
+    /// place, without changing the frame's mark from `.tween`. The eased
+    /// curve then re-targets through this point on both sides (see
+    /// `TLLayer.checkpointBracket`). A no-op unless `frame` is actually
+    /// inside a live tween span.
+    func addPropertyKeyframe(layer: TLLayer, at frame: Int) {
+        guard layer.frames.indices.contains(frame - 1), case .tween = layer.frames[frame - 1] else { return }
+        withUndoSnapshot {
+            if let v = layer.interpolatedPlacedText(at: frame) {
+                layer.textFrames[frame] = v
+            } else if let v = layer.interpolatedSymbolInstance(at: frame) {
+                layer.symbolFrames[frame] = v
+            } else if let v = layer.interpolatedPlacedShape(at: frame) {
+                layer.shapeFrames[frame] = v
+            }
+        }
+    }
+
+    /// Removes a property keyframe at `frame`, letting the span ease
+    /// straight through where it used to be again. A no-op if `frame`
+    /// isn't actually one (see `TLLayer.isPropertyKeyframe`).
+    func removePropertyKeyframe(layer: TLLayer, at frame: Int) {
+        guard layer.isPropertyKeyframe(at: frame) else { return }
+        withUndoSnapshot {
+            layer.textFrames[frame] = nil
+            layer.symbolFrames[frame] = nil
+            layer.shapeFrames[frame] = nil
         }
     }
 

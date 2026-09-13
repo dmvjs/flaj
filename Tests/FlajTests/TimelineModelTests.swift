@@ -434,6 +434,103 @@ final class TimelineModelTests: XCTestCase {
         XCTAssertEqual(dest.textFrames[3]?.text, "B")
     }
 
+    // MARK: - Property keyframes
+
+    func testIsPropertyKeyframeTrueOnlyOnATweenFrameWithItsOwnContent() {
+        let layer = TLLayer(name: "text", swatch: .green, frames: [.keyframe(hasScript: false), .tween, .keyframe(hasScript: false)])
+        XCTAssertFalse(layer.isPropertyKeyframe(at: 2), "a plain .tween frame with no content of its own isn't one")
+
+        layer.textFrames[2] = PlacedText(text: "mid", x: 0, y: 0, width: 10, height: 10)
+        XCTAssertTrue(layer.isPropertyKeyframe(at: 2))
+        XCTAssertFalse(layer.isPropertyKeyframe(at: 1), "frame 1 is a real keyframe, not a property keyframe")
+    }
+
+    /// Adding a property keyframe must be visually seamless — it captures
+    /// exactly what was already interpolating there, so nothing appears to
+    /// jump the instant you add it.
+    func testAddPropertyKeyframeCapturesTheCurrentlyInterpolatedValueExactly() {
+        let layer = TLLayer(name: "text", swatch: .green, frames: [.keyframe(hasScript: false), .tween, .tween, .tween, .keyframe(hasScript: false)])
+        layer.textFrames[1] = PlacedText(text: "A", x: 0, y: 0, width: 10, height: 10)
+        layer.textFrames[5] = PlacedText(text: "A", x: 100, y: 0, width: 10, height: 10)
+        layer.tweenSettings[1] = TweenSettings(family: .linear)
+        let doc = TimelineDocument(layers: [layer], totalFrames: 5)
+
+        let before = layer.interpolatedPlacedText(at: 3)?.x
+        doc.addPropertyKeyframe(layer: layer, at: 3)
+
+        XCTAssertTrue(layer.isPropertyKeyframe(at: 3))
+        XCTAssertEqual(layer.textFrames[3]?.x, before)
+        XCTAssertEqual(layer.frames[2], .tween, "adding one doesn't change the frame's mark")
+    }
+
+    func testAddPropertyKeyframeIsANoOpOutsideALiveTweenSpan() {
+        let layer = TLLayer(name: "text", swatch: .green, frames: [.keyframe(hasScript: false), .plain])
+        layer.textFrames[1] = PlacedText(text: "A", x: 0, y: 0, width: 10, height: 10)
+        let doc = TimelineDocument(layers: [layer], totalFrames: 2)
+
+        doc.addPropertyKeyframe(layer: layer, at: 2)
+        XCTAssertNil(layer.textFrames[2], "frame 2 is a plain span, not a tween — nothing to checkpoint")
+    }
+
+    /// The actual point of a property keyframe: the eased curve re-targets
+    /// through it, so a segment on one side of the checkpoint can look
+    /// completely different from the segment on the other side.
+    func testPropertyKeyframeSplitsTheSpanIntoTwoIndependentlyEasedSegments() {
+        let layer = TLLayer(name: "text", swatch: .green, frames: [.keyframe(hasScript: false), .tween, .tween, .tween, .keyframe(hasScript: false)])
+        layer.textFrames[1] = PlacedText(text: "A", x: 0, y: 0, width: 10, height: 10)
+        layer.textFrames[5] = PlacedText(text: "A", x: 100, y: 0, width: 10, height: 10)
+        layer.tweenSettings[1] = TweenSettings(family: .linear)
+        // A property keyframe at frame 3 that overshoots past both
+        // endpoints — impossible to produce by simply easing 0->100.
+        layer.textFrames[3] = PlacedText(text: "A", x: 200, y: 0, width: 10, height: 10)
+        let doc = TimelineDocument(layers: [layer], totalFrames: 5)
+
+        XCTAssertEqual(doc.layers[0].interpolatedPlacedText(at: 2)?.x ?? -1, 100, accuracy: 0.01, "halfway from 0 to the checkpoint's 200")
+        XCTAssertEqual(layer.interpolatedPlacedText(at: 3)?.x ?? -1, 200, accuracy: 0.01, "exactly on the checkpoint")
+        XCTAssertEqual(layer.interpolatedPlacedText(at: 4)?.x ?? -1, 150, accuracy: 0.01, "halfway from the checkpoint's 200 back down to 100")
+        XCTAssertEqual(layer.interpolatedPlacedText(at: 5)?.x ?? -1, 100, accuracy: 0.01)
+    }
+
+    func testRemovePropertyKeyframeLetsTheSpanEaseThroughAgain() {
+        let layer = TLLayer(name: "text", swatch: .green, frames: [.keyframe(hasScript: false), .tween, .tween, .tween, .keyframe(hasScript: false)])
+        layer.textFrames[1] = PlacedText(text: "A", x: 0, y: 0, width: 10, height: 10)
+        layer.textFrames[5] = PlacedText(text: "A", x: 100, y: 0, width: 10, height: 10)
+        layer.textFrames[3] = PlacedText(text: "A", x: 999, y: 0, width: 10, height: 10)
+        layer.tweenSettings[1] = TweenSettings(family: .linear)
+        let doc = TimelineDocument(layers: [layer], totalFrames: 5)
+
+        doc.removePropertyKeyframe(layer: layer, at: 3)
+
+        XCTAssertNil(layer.textFrames[3])
+        XCTAssertFalse(layer.isPropertyKeyframe(at: 3))
+        XCTAssertEqual(layer.interpolatedPlacedText(at: 3)?.x ?? -1, 50, accuracy: 0.01, "back to a plain straight-line ease from 0 to 100")
+    }
+
+    func testRemovePropertyKeyframeIsANoOpWhenThereIsntOne() {
+        let layer = TLLayer(name: "text", swatch: .green, frames: [.keyframe(hasScript: false), .tween, .keyframe(hasScript: false)])
+        layer.textFrames[1] = PlacedText(text: "A", x: 0, y: 0, width: 10, height: 10)
+        layer.textFrames[3] = PlacedText(text: "A", x: 100, y: 0, width: 10, height: 10)
+        let doc = TimelineDocument(layers: [layer], totalFrames: 3)
+
+        doc.removePropertyKeyframe(layer: layer, at: 2) // shouldn't crash or touch anything
+        XCTAssertEqual(layer.textFrames[1]?.x, 0)
+        XCTAssertEqual(layer.textFrames[3]?.x, 100)
+    }
+
+    func testRemoveTweenAlsoClearsAnyPropertyKeyframesInTheSpan() {
+        let layer = TLLayer(name: "text", swatch: .green, frames: [.keyframe(hasScript: false), .tween, .tween, .keyframe(hasScript: false)])
+        layer.textFrames[1] = PlacedText(text: "A", x: 0, y: 0, width: 10, height: 10)
+        layer.textFrames[4] = PlacedText(text: "A", x: 100, y: 0, width: 10, height: 10)
+        layer.textFrames[2] = PlacedText(text: "A", x: 50, y: 0, width: 10, height: 10)
+        layer.tweenSettings[1] = TweenSettings(family: .linear)
+        let doc = TimelineDocument(layers: [layer], totalFrames: 4)
+
+        doc.removeTween(layer: layer, at: 2)
+
+        XCTAssertNil(layer.textFrames[2], "the mid-span property keyframe shouldn't linger as dead data")
+        XCTAssertEqual(layer.frames, [.keyframe(hasScript: false), .plain, .plain, .keyframe(hasScript: false)])
+    }
+
     func testColorEasingIsIndependentOfPositionEasing() {
         // Same span, deliberately mismatched curves: position eases out
         // quad (front-loaded motion), color eases in cubic (back-loaded

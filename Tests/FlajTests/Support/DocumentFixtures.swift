@@ -57,6 +57,40 @@ enum DocumentFixtures {
         return doc
     }
 
+    /// Same shape as `tweenedText()`, but with a property keyframe (Flash's
+    /// diamond marker) at the span's midpoint holding an x value neither a
+    /// straight 0->1 ease nor a linear interpolation could ever produce —
+    /// proves the exported page's WAAPI animation actually re-targets
+    /// through the checkpoint instead of ignoring it.
+    static func propertyKeyframeText() -> TimelineDocument {
+        let totalFrames = 9
+        var frames = [FrameMark](repeating: .tween, count: totalFrames)
+        frames[0] = .keyframe(hasScript: false)
+        frames[totalFrames - 1] = .keyframe(hasScript: false)
+
+        let layer = TLLayer(name: "text", swatch: .green, frames: frames)
+        layer.textFrames[1] = PlacedText(
+            text: "Flaj", x: 0, y: 4, width: 70, height: 20,
+            fontName: "Helvetica", fontSize: 16, colorHex: "#000000"
+        )
+        layer.textFrames[5] = PlacedText(
+            text: "Flaj", x: 200, y: 4, width: 70, height: 20,
+            fontName: "Helvetica", fontSize: 16, colorHex: "#000000"
+        )
+        layer.textFrames[totalFrames] = PlacedText(
+            text: "Flaj", x: 100, y: 4, width: 70, height: 20,
+            fontName: "Helvetica", fontSize: 16, colorHex: "#000000"
+        )
+        layer.tweenSettings[1] = TweenSettings(family: .linear)
+
+        let doc = TimelineDocument(layers: [layer], totalFrames: totalFrames)
+        doc.stageWidth = 210
+        doc.stageHeight = 32
+        doc.stageColor = .white
+        doc.fps = 8
+        return doc
+    }
+
     /// A 3-frame span (so the midpoint frame lands at an exact rawT of 0.5)
     /// that fades color black->white and opacity 1->0, on `.linear` easing
     /// so the expected midpoint is exact, not just approximately eased —
@@ -291,6 +325,29 @@ enum DocumentFixtures {
     /// and growing its stroke width from 0 (color group, linear) — mirrors
     /// `tweenedText()` but exercising `interpolatedPlacedShape`'s two
     /// independently-eased groups instead of text's.
+    /// Same idea as `propertyKeyframeText()` for a shape span — a property
+    /// keyframe at the midpoint with an x value neither endpoint could
+    /// produce on its own.
+    static func propertyKeyframeShape() -> TimelineDocument {
+        let totalFrames = 9
+        var frames = [FrameMark](repeating: .tween, count: totalFrames)
+        frames[0] = .keyframe(hasScript: false)
+        frames[totalFrames - 1] = .keyframe(hasScript: false)
+
+        let layer = TLLayer(name: "shape", swatch: .green, frames: frames)
+        layer.shapeFrames[1] = PlacedShape(kind: .rectangle, x: 0, y: 4, width: 20, height: 20)
+        layer.shapeFrames[5] = PlacedShape(kind: .rectangle, x: 200, y: 4, width: 20, height: 20)
+        layer.shapeFrames[totalFrames] = PlacedShape(kind: .rectangle, x: 100, y: 4, width: 20, height: 20)
+        layer.tweenSettings[1] = TweenSettings(family: .linear)
+
+        let doc = TimelineDocument(layers: [layer], totalFrames: totalFrames)
+        doc.stageWidth = 220
+        doc.stageHeight = 32
+        doc.stageColor = .white
+        doc.fps = 8
+        return doc
+    }
+
     static func tweenedShape() -> TimelineDocument {
         let totalFrames = 10
         var frames = [FrameMark](repeating: .tween, count: totalFrames)

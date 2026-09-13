@@ -435,6 +435,81 @@
     return { color: placement.colorHex, opacity: String(placement.opacity) };
   }
 
+  /// Every checkpoint inside [kf, endKf] on a text/symbol-instance layer —
+  /// the span's own start/end plus any property keyframes (Flash's diamond
+  /// marker; see TLLayer.isPropertyKeyframe on the Swift side, which this
+  /// mirrors exactly: any textFrames/symbolFrames entry inside the span
+  /// counts, no separate "type" field needed). Always resolved through
+  /// resolvePlacement so a symbol instance's compounded content, not just
+  /// its own instance fields, is what gets checkpointed.
+  function tweenCheckpoints(layer, kf, endKf) {
+    const dict = layer.textFrames[kf] ? layer.textFrames : layer.symbolFrames;
+    return Object.keys(dict).map(Number).filter(f => f >= kf && f <= endKf).sort((a, b) => a - b)
+      .map(frame => ({ frame, placement: resolvePlacement(layer, frame) }));
+  }
+
+  /// Turns a list of {frame, placement} checkpoints into a WAAPI keyframe
+  /// array, plus the `easing` to pass in `animate()`'s own options object.
+  ///
+  /// Exactly two checkpoints (the common case: no property keyframes)
+  /// returns that pair verbatim plus an animation-level easing — unchanged
+  /// from before property keyframes existed.
+  ///
+  /// Three or more (a real property keyframe present) resamples the whole
+  /// piecewise-eased curve into `steps` evenly-spaced value keyframes with
+  /// a flat top-level 'linear' timing between them, mirroring
+  /// TLLayer.checkpointBracket's bracket-and-locally-ease logic on the
+  /// Swift side. This is the same technique
+  /// resampleCombinedSymbolLoopKeyframes already uses to bake an arbitrary
+  /// curve into something every engine plays back correctly — needed here
+  /// because a per-keyframe `easing` using the baked `linear(...)` timing
+  /// function (as opposed to a keyword easing) was verified NOT to apply
+  /// correctly in a real WKWebView: it silently fell back to plain linear
+  /// interpolation instead of the intended curve.
+  ///
+  /// `numericFields` lists which of `keyframeBuilder`'s placement fields to
+  /// linearly interpolate per sample; `hexFields` lists which to interpolate
+  /// as colors instead (via lerpHexColor) — every other field just comes
+  /// along from the bracketing low checkpoint unchanged, same as `result = base`
+  /// in the Swift interpolation functions this mirrors.
+  function checkpointedKeyframes(checkpoints, kf, endKf, settings, keyframeBuilder, numericFields, hexFields) {
+    if (checkpoints.length <= 2) {
+      const frames = checkpoints.map(cp => {
+        const offset = endKf > kf ? (cp.frame - kf) / (endKf - kf) : 0;
+        const obj = keyframeBuilder(cp.placement, offset);
+        obj.offset = offset;
+        return obj;
+      });
+      return { frames, easing: cssEasingForTween(settings) };
+    }
+    const steps = 40;
+    const frames = [];
+    for (let i = 0; i <= steps; i++) {
+      const sampleOffset = i / steps;
+      const sampleFrame = kf + sampleOffset * (endKf - kf);
+      let lo = checkpoints[0], hi = checkpoints[checkpoints.length - 1];
+      for (let j = 0; j < checkpoints.length - 1; j++) {
+        if (sampleFrame >= checkpoints[j].frame && sampleFrame <= checkpoints[j + 1].frame) {
+          lo = checkpoints[j]; hi = checkpoints[j + 1];
+          break;
+        }
+      }
+      const localT = hi.frame > lo.frame ? (sampleFrame - lo.frame) / (hi.frame - lo.frame) : 0;
+      const t = easedProgress(settings, localT);
+      const placement = { ...lo.placement };
+      for (const field of numericFields) {
+        placement[field] = lo.placement[field] + ((hi.placement[field] ?? lo.placement[field]) - lo.placement[field]) * t;
+      }
+      for (const field of hexFields) {
+        placement[field] = lerpHexColor(lo.placement[field], hi.placement[field], t);
+      }
+      const obj = keyframeBuilder(placement, sampleOffset);
+      obj.offset = sampleOffset;
+      frames.push(obj);
+    }
+    return { frames, easing: 'linear' };
+  }
+
   /// Builds the DOM element + (for a tween span) its two independent Web
   /// Animations for the span governed by keyframe `kf` on `layer` — called
   /// once per span, not per frame. Position/size/rotation ease on
@@ -493,17 +568,18 @@
         animations.push(colorAnimation);
       } else {
         const totalSpin = spinDegrees(boxSettings, 1);
-        const boxAnimation = el.animate(
-          [boxKeyframe(base, 0), boxKeyframe(end, totalSpin)],
-          { duration: durationMs, easing: cssEasingForTween(boxSettings), fill: 'both' }
+        const checkpoints = tweenCheckpoints(layer, kf, endKf);
+        const box = checkpointedKeyframes(
+          checkpoints, kf, endKf, boxSettings,
+          (placement, offset) => boxKeyframe(placement, totalSpin * offset),
+          ['x', 'y', 'width', 'height', 'fontSize', 'scale', 'rotation'], []
         );
+        const boxAnimation = el.animate(box.frames, { duration: durationMs, fill: 'both', easing: box.easing });
         boxAnimation.pause();
         animations.push(boxAnimation);
 
-        const colorAnimation = el.animate(
-          [colorKeyframe(base), colorKeyframe(end)],
-          { duration: durationMs, easing: cssEasingForTween(colorSettings), fill: 'both' }
-        );
+        const color = checkpointedKeyframes(checkpoints, kf, endKf, colorSettings, colorKeyframe, ['opacity'], ['colorHex']);
+        const colorAnimation = el.animate(color.frames, { duration: durationMs, fill: 'both', easing: color.easing });
         colorAnimation.pause();
         animations.push(colorAnimation);
       }
@@ -657,17 +733,25 @@
 
     if (endKf != null && end && endKf > kf) {
       const durationMs = ((endKf - kf) / fps) * 1000;
-      const boxAnimation = el.animate(
-        [shapeBoxKeyframe(base), shapeBoxKeyframe(end)],
-        { duration: durationMs, easing: cssEasingForTween(layer.tweenSettings[kf]), fill: 'both' }
+      // Same checkpoint mechanism as the text/symbol path (see
+      // tweenCheckpoints/checkpointedKeyframes) — a property keyframe here
+      // is just an extra shapeFrames entry at an intermediate .tween frame.
+      const frames = Object.keys(layer.shapeFrames).map(Number).filter(f => f >= kf && f <= endKf).sort((a, b) => a - b);
+      const checkpoints = frames.map(frame => ({ frame, placement: layer.shapeFrames[frame] }));
+
+      const box = checkpointedKeyframes(
+        checkpoints, kf, endKf, layer.tweenSettings[kf], shapeBoxKeyframe,
+        ['x', 'y', 'width', 'height', 'strokeWidth', 'cornerRadius'], []
       );
+      const boxAnimation = el.animate(box.frames, { duration: durationMs, fill: 'both', easing: box.easing });
       boxAnimation.pause();
       animations.push(boxAnimation);
 
-      const colorAnimation = el.animate(
-        [shapeColorKeyframe(base), shapeColorKeyframe(end)],
-        { duration: durationMs, easing: cssEasingForTween(layer.colorTweenSettings[kf]), fill: 'both' }
+      const color = checkpointedKeyframes(
+        checkpoints, kf, endKf, layer.colorTweenSettings[kf], shapeColorKeyframe,
+        ['fillOpacity', 'strokeOpacity', 'opacity'], ['fillColorHex', 'strokeColorHex']
       );
+      const colorAnimation = el.animate(color.frames, { duration: durationMs, fill: 'both', easing: color.easing });
       colorAnimation.pause();
       animations.push(colorAnimation);
     } else {

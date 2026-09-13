@@ -624,6 +624,67 @@ final class WebExportTests: XCTestCase {
         XCTAssertGreaterThan(left, 24)
     }
 
+    /// Proves the exported page's WAAPI animation actually re-targets
+    /// through a mid-span property keyframe (see `checkpointedKeyframes`'s
+    /// resampling in player.js) rather than ignoring it and interpolating
+    /// straight from the span's start to its end.
+    func testPropertyKeyframeReTargetsTheExportedAnimationThroughTheCheckpoint() async throws {
+        let doc = DocumentFixtures.propertyKeyframeText() // linear, x: 0 -> 200 (frame 5 checkpoint) -> 100 (frame 9)
+        let url = exportedURL(doc)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let harness = WebViewHarness()
+        try await harness.load(fileURL: url)
+
+        func leftPx(atFrame frame: Int) async throws -> Double {
+            try await harness.evaluate("gotoAndStop(\(frame))")
+            let s = try await harness.evaluate("getComputedStyle(document.querySelector('.flaj-text')).left") as? String
+            return Double((s ?? "").replacingOccurrences(of: "px", with: "")) ?? -1
+        }
+
+        // Straight linear interpolation from frame 1 (x=0) to frame 9
+        // (x=100) would put frame 5 at x=50 — the checkpoint instead pins
+        // it at 200, and frame 3 (halfway to the checkpoint) at 100, proving
+        // the curve genuinely re-targets rather than passing through.
+        let atFrame1 = try await leftPx(atFrame: 1)
+        let atFrame3 = try await leftPx(atFrame: 3)
+        let atFrame5 = try await leftPx(atFrame: 5)
+        let atFrame7 = try await leftPx(atFrame: 7)
+        let atFrame9 = try await leftPx(atFrame: 9)
+        XCTAssertEqual(atFrame1, 0, accuracy: 1.0)
+        XCTAssertEqual(atFrame3, 100, accuracy: 5.0, "halfway from 0 to the checkpoint's 200")
+        XCTAssertEqual(atFrame5, 200, accuracy: 1.0, "exactly on the checkpoint")
+        XCTAssertEqual(atFrame7, 150, accuracy: 5.0, "halfway from the checkpoint's 200 back down to 100")
+        XCTAssertEqual(atFrame9, 100, accuracy: 1.0)
+    }
+
+    /// Same proof as the text case, for a shape span — property keyframes
+    /// share the same `checkpointedKeyframes` resampling on both paths, but
+    /// the shape path builds its checkpoint list directly from
+    /// `layer.shapeFrames` rather than through `resolvePlacement`, so it's
+    /// worth its own end-to-end check.
+    func testPropertyKeyframeReTargetsAnExportedShapeTweenThroughTheCheckpoint() async throws {
+        let doc = DocumentFixtures.propertyKeyframeShape() // linear, x: 0 -> 200 (frame 5 checkpoint) -> 100 (frame 9)
+        let url = exportedURL(doc)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let harness = WebViewHarness()
+        try await harness.load(fileURL: url)
+
+        func leftPx(atFrame frame: Int) async throws -> Double {
+            try await harness.evaluate("gotoAndStop(\(frame))")
+            let s = try await harness.evaluate("getComputedStyle(document.querySelector('.flaj-shape')).left") as? String
+            return Double((s ?? "").replacingOccurrences(of: "px", with: "")) ?? -1
+        }
+
+        let atFrame3 = try await leftPx(atFrame: 3)
+        let atFrame5 = try await leftPx(atFrame: 5)
+        let atFrame7 = try await leftPx(atFrame: 7)
+        XCTAssertEqual(atFrame3, 100, accuracy: 5.0, "halfway from 0 to the checkpoint's 200, not the 25 a straight 0->100 ease would give")
+        XCTAssertEqual(atFrame5, 200, accuracy: 1.0, "exactly on the checkpoint")
+        XCTAssertEqual(atFrame7, 150, accuracy: 5.0, "halfway from the checkpoint's 200 back down to 100")
+    }
+
     func testColorAndOpacityAnimateIndependentlyOfPosition() async throws {
         let doc = DocumentFixtures.colorFadeText() // black->white, opacity 1->0, over frames 1...3, .linear
         let url = exportedURL(doc)
