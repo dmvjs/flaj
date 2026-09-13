@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 @testable import Flaj
 
 /// Direct tests of `TLLayer.interpolatedPlacedText` — the one source of
@@ -299,5 +300,66 @@ final class TimelineModelTests: XCTestCase {
         let placement = layer.interpolatedPlacedText(at: 2)
         XCTAssertEqual(placement?.x ?? -1, 43.75, accuracy: 0.01)
         XCTAssertEqual(placement?.opacity ?? -1, 0.015625, accuracy: 0.0001)
+    }
+
+    // MARK: - webExportPageBackground split hex/opacity bindings
+    //
+    // The one piece of genuinely new logic behind swapping ColorPicker for
+    // NativeColorWell (see NativeColorWell's own doc comment on why): every
+    // other color+opacity pairing in the Properties panel was already two
+    // separate model fields (PlacedText.colorHex/.opacity, PlacedShape.
+    // fillColorHex/.fillOpacity, etc.) shown via two separate controls now
+    // instead of one combined Binding<Color> — no new binding logic there,
+    // just less of it. webExportPageBackground is the one exception: it's
+    // genuinely a single Color at the model level, so these two bindings
+    // are what split it into a hex-only control and an opacity-only
+    // control without becoming two separate stored fields.
+
+    func testWebExportPageBackgroundHexBindingPreservesTheExistingOpacity() {
+        let doc = TimelineDocument(layers: [TLLayer(name: "l", swatch: .green, frames: [.empty])], totalFrames: 1)
+        doc.webExportPageBackground = Color(red: 1, green: 0, blue: 0, opacity: 0.4)
+
+        doc.webExportPageBackgroundHexBinding.wrappedValue = Color(red: 0, green: 0, blue: 1)
+
+        XCTAssertEqual(doc.webExportPageBackground.hexString, "#0000FF")
+        XCTAssertEqual(doc.webExportPageBackground.opacityComponent, 0.4, accuracy: 0.01)
+    }
+
+    func testWebExportPageBackgroundOpacityBindingPreservesTheExistingHex() {
+        let doc = TimelineDocument(layers: [TLLayer(name: "l", swatch: .green, frames: [.empty])], totalFrames: 1)
+        doc.webExportPageBackground = Color(red: 1, green: 0, blue: 0, opacity: 1)
+
+        doc.webExportPageBackgroundOpacityBinding.wrappedValue = 0.25
+
+        XCTAssertEqual(doc.webExportPageBackground.hexString, "#FF0000")
+        XCTAssertEqual(doc.webExportPageBackground.opacityComponent, 0.25, accuracy: 0.01)
+    }
+
+    func testWebExportPageBackgroundHexBindingReadsTheCurrentColorAsOpaque() {
+        let doc = TimelineDocument(layers: [TLLayer(name: "l", swatch: .green, frames: [.empty])], totalFrames: 1)
+        doc.webExportPageBackground = Color(red: 0, green: 1, blue: 0, opacity: 0.5)
+
+        XCTAssertEqual(doc.webExportPageBackgroundHexBinding.wrappedValue.hexString, "#00FF00")
+        XCTAssertEqual(doc.webExportPageBackgroundHexBinding.wrappedValue.opacityComponent, 1, accuracy: 0.01)
+    }
+
+    func testWebExportPageBackgroundOpacityBindingReadsTheCurrentOpacity() {
+        let doc = TimelineDocument(layers: [TLLayer(name: "l", swatch: .green, frames: [.empty])], totalFrames: 1)
+        doc.webExportPageBackground = Color(red: 0, green: 1, blue: 0, opacity: 0.7)
+
+        XCTAssertEqual(doc.webExportPageBackgroundOpacityBinding.wrappedValue, 0.7, accuracy: 0.01)
+    }
+
+    func testWebExportPageBackgroundHexAndOpacityEditsAreBothUndoable() {
+        let doc = TimelineDocument(layers: [TLLayer(name: "l", swatch: .green, frames: [.empty])], totalFrames: 1)
+        doc.webExportPageBackground = Color(red: 1, green: 0, blue: 0, opacity: 1)
+
+        doc.webExportPageBackgroundHexBinding.wrappedValue = Color(red: 0, green: 0, blue: 1)
+        doc.undo()
+        XCTAssertEqual(doc.webExportPageBackground.hexString, "#FF0000")
+
+        doc.webExportPageBackgroundOpacityBinding.wrappedValue = 0.1
+        doc.undo()
+        XCTAssertEqual(doc.webExportPageBackground.opacityComponent, 1, accuracy: 0.01)
     }
 }

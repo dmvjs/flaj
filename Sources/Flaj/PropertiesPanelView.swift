@@ -179,24 +179,24 @@ struct PropertiesPanelView: View {
                 .pickerStyle(.segmented)
                 .controlSize(.small)
 
-                HStack(alignment: .top, spacing: 8) {
-                    StageAlignmentGrid(selection: doc.undoableBinding(\.webExportAlignment))
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 6) {
-                            Text("Page BG").font(.system(size: 11)).foregroundStyle(.secondary)
-                            NativeColorWell(color: doc.webExportPageBackgroundHexBinding)
-                            Slider(value: doc.webExportPageBackgroundOpacityBinding, in: 0...1)
-                                .controlSize(.small)
-                            Text("\(Int((doc.webExportPageBackground.opacityComponent * 100).rounded()))%")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.secondary)
-                                .frame(width: 28, alignment: .trailing)
-                        }
-                        Toggle("Minify JS", isOn: doc.undoableBinding(\.webExportMinify))
-                            .toggleStyle(.checkbox)
-                            .font(.system(size: 11))
-                    }
+                // Stacked rather than side-by-side with the alignment grid —
+                // at the panel's slim default width, putting the grid and
+                // this row shoulder to shoulder left too little room for
+                // "Page BG" and it wrapped letter-by-letter.
+                StageAlignmentGrid(selection: doc.undoableBinding(\.webExportAlignment))
+                HStack(spacing: 6) {
+                    Text("Page BG").font(.system(size: 11)).foregroundStyle(.secondary).fixedSize()
+                    NativeColorWell(color: doc.webExportPageBackgroundHexBinding)
+                    Slider(value: doc.webExportPageBackgroundOpacityBinding, in: 0...1)
+                        .controlSize(.small)
+                    Text("\(Int((doc.webExportPageBackground.opacityComponent * 100).rounded()))%")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, alignment: .trailing)
                 }
+                Toggle("Minify JS", isOn: doc.undoableBinding(\.webExportMinify))
+                    .toggleStyle(.checkbox)
+                    .font(.system(size: 11))
             }
         }
     }
@@ -632,7 +632,24 @@ struct PropertiesPanelView: View {
                 HStack(spacing: 6) {
                     Spacer().frame(width: Self.fieldLabelWidth)
                     numberField("Width", binding.strokeWidth)
+                    Picker("", selection: binding.strokeStyle) {
+                        Text("Solid").tag(StrokeDashStyle.solid)
+                        Text("Dashed").tag(StrokeDashStyle.dashed)
+                        Text("Dotted").tag(StrokeDashStyle.dotted)
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .controlSize(.small)
+                    .frame(width: 80)
                     Spacer()
+                }
+                // Corner radius only means something on a rectangle — an
+                // ellipse has no corners to round.
+                if binding.wrappedValue.kind == .rectangle {
+                    HStack(spacing: 6) {
+                        numberField("Corner", binding.cornerRadius)
+                        Spacer()
+                    }
                 }
                 HStack(spacing: 6) {
                     Text("Opacity").font(.system(size: 10)).foregroundStyle(.secondary).frame(width: 44, alignment: .leading)

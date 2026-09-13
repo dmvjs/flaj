@@ -200,7 +200,13 @@ struct LayerRowView: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Spacer().frame(width: CGFloat(layer.indent) * 12)
+            // The extra 10pt for a masked layer is independent of
+            // `layer.indent` (folder nesting) — masking is its own
+            // relationship, not a change to where this layer sits in the
+            // folder hierarchy, but Flash's own visual convention (a
+            // masked layer's row indented under its mask) is worth
+            // reproducing even without touching that field.
+            Spacer().frame(width: CGFloat(layer.indent) * 12 + (layer.masked ? 10 : 0))
 
             if layer.kind == .folder {
                 Image(systemName: layer.expanded ? "chevron.down" : "chevron.right")
@@ -210,7 +216,7 @@ struct LayerRowView: View {
 
             Image(systemName: iconName)
                 .font(.system(size: 10))
-                .foregroundStyle(layer.swatch)
+                .foregroundStyle(layer.masked ? AnyShapeStyle(.secondary) : AnyShapeStyle(layer.swatch))
                 .frame(width: 14)
 
             if isEditingName {
@@ -290,6 +296,15 @@ struct LayerRowView: View {
             Button("Add Layer") { doc.addLayer() }
             Button("Add Folder") { doc.addFolder() }
             Divider()
+            // A mask can't itself be masked, and a masked layer can't
+            // itself become a mask — same rule TimelineDocument.
+            // toggleLayerMask/toggleLayerMasked enforce, mirrored here so
+            // the disabled state actually explains why nothing happens.
+            Toggle("Mask", isOn: Binding(get: { layer.kind == .mask }, set: { _ in doc.toggleLayerMask(layer) }))
+                .disabled(layer.masked)
+            Toggle("Masked", isOn: Binding(get: { layer.masked }, set: { _ in doc.toggleLayerMasked(layer) }))
+                .disabled(layer.kind == .mask)
+            Divider()
             Button("Delete Layer", role: .destructive) { doc.deleteLayer(layer) }
         }
     }
@@ -309,6 +324,7 @@ struct LayerRowView: View {
         switch layer.kind {
         case .normal: return "square.on.square"
         case .folder: return "folder.fill"
+        case .mask: return "theatermasks.fill"
         }
     }
 }

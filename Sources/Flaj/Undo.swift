@@ -32,6 +32,7 @@ extension TimelineDocument {
         let selectedPlacement: TextPlacementRef?
         let selectedSymbolPlacement: SymbolPlacementRef?
         let selectedShapePlacement: ShapePlacementRef?
+        let selectedGroupPlacement: GroupPlacementRef?
         // Which symbol's Timeline (if any) `layers`/`totalFrames` meant at
         // the moment of this snapshot — restoring it is what makes undoing
         // an edit made while editing a symbol in place also put the Stage
@@ -54,7 +55,7 @@ extension TimelineDocument {
             file: makeSaveFile(), selectedLayerID: selectedLayerID,
             playhead: playhead, selectedFrame: selectedFrame, selectedPlacement: selectedPlacement,
             selectedSymbolPlacement: selectedSymbolPlacement, selectedShapePlacement: selectedShapePlacement,
-            editingPath: editingPath
+            selectedGroupPlacement: selectedGroupPlacement, editingPath: editingPath
         )
     }
 
@@ -121,6 +122,12 @@ extension TimelineDocument {
         playhead = min(max(entry.playhead, 1), max(totalFrames, 1))
         selectedFrame = min(max(entry.selectedFrame, 1), max(totalFrames, 1))
         rangeSelectionEnd = nil
+        // A multi-selection beyond the primary ref isn't restored — each
+        // additional member would need its own type-specific dangling-
+        // reference check the way the four primary refs get below, and
+        // Cmd+Z landing back on just the primary selection (rather than a
+        // stale, possibly-dangling multi-selection) is the safer default.
+        additionalSelectedPlacements.removeAll()
         if let ref = entry.selectedPlacement,
            layers.first(where: { $0.id == ref.layerID })?.textFrames[ref.keyframe] != nil {
             selectedPlacement = ref
@@ -138,6 +145,12 @@ extension TimelineDocument {
             selectedShapePlacement = ref
         } else {
             selectedShapePlacement = nil
+        }
+        if let ref = entry.selectedGroupPlacement,
+           layers.first(where: { $0.id == ref.layerID })?.groupFrames[ref.keyframe] != nil {
+            selectedGroupPlacement = ref
+        } else {
+            selectedGroupPlacement = nil
         }
     }
 }

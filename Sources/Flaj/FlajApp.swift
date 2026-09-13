@@ -30,25 +30,42 @@ struct FlajApp: App {
 
     var body: some Scene {
         WindowGroup("Flaj") {
-            VStack(spacing: 0) {
+            HSplitView {
+                ToolbarView(doc: doc)
+                    .frame(width: 40)
+                // Stage and the Timeline/Script/Debug stack share this one
+                // column, so they're always exactly as wide as each other —
+                // matching Flash's own layout, where the Timeline docks
+                // directly under the Stage rather than spanning the whole
+                // window (which would run it under the Properties dock too).
                 VSplitView {
-                    HSplitView {
-                        ToolbarView(doc: doc)
-                            .frame(width: 40)
-                        StageView(doc: doc)
-                            .frame(minWidth: 320, minHeight: 260, idealHeight: 380)
-                        PropertiesPanelView(doc: doc)
-                            .frame(minWidth: 260, minHeight: 260, idealHeight: 420)
-                    }
-                    VSplitView {
-                        TimelineView(doc: doc)
-                            .frame(minHeight: 220, idealHeight: 280)
-                        CodeEditorPanel(doc: doc)
-                            .frame(minHeight: 100, idealHeight: 140)
-                        DebugConsoleView(doc: doc)
-                            .frame(minHeight: 100, idealHeight: 120)
-                    }
+                    StageView(doc: doc)
+                        .frame(minWidth: 320, minHeight: 260, idealHeight: 380)
+                    TimelineView(doc: doc)
+                        .frame(minHeight: 220, idealHeight: 280)
+                    CodeEditorPanel(doc: doc)
+                        .frame(minHeight: 100, idealHeight: 140)
+                    DebugConsoleView(doc: doc)
+                        .frame(minHeight: 100, idealHeight: 120)
                 }
+                // Higher layout priority than Properties (below) so any
+                // extra window width goes here — otherwise HSplitView hands
+                // leftover space to the trailing pane by default, which
+                // would balloon Properties past its slim ideal width every
+                // time the window opens wider than the sum of the panes'
+                // minimums.
+                .layoutPriority(1)
+                // A full-height dock, like Flash's own Properties column,
+                // which runs the whole height of the window (alongside the
+                // Timeline too, not just the Stage) so its stacked sections
+                // — position, character, filters, align, and so on — have
+                // room to sit open as a running column instead of fighting
+                // over a short shelf next to the Stage alone.
+                // idealWidth matches minWidth so the panel opens as slim as
+                // it can and the user has to deliberately drag it wider,
+                // rather than defaulting to extra width nobody asked for.
+                PropertiesPanelView(doc: doc)
+                    .frame(minWidth: 260, idealWidth: 260)
             }
             .frame(minWidth: 900, idealWidth: 1600, minHeight: 860, idealHeight: 900)
             .sheet(isPresented: $doc.webExportSheetPresented) {
@@ -96,6 +113,15 @@ struct FlajApp: App {
                     .keyboardShortcut("r", modifiers: [.command, .option, .shift])
                 Toggle("Show Guides", isOn: $doc.guidesVisible)
                     .keyboardShortcut(";", modifiers: .command)
+            }
+            CommandMenu("Modify") {
+                // Flash/Illustrator's own Group/Ungroup shortcuts.
+                Button("Group") { doc.groupSelection() }
+                    .keyboardShortcut("g", modifiers: .command)
+                    .disabled(doc.selectedPlacements.count < 2)
+                Button("Ungroup") { doc.ungroupSelection() }
+                    .keyboardShortcut("g", modifiers: [.command, .shift])
+                    .disabled(doc.selectedGroupPlacement == nil)
             }
         }
     }

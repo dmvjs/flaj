@@ -169,8 +169,19 @@ enum DocumentFixtures {
                 strokeWidth: 3, opacity: 0.85
             )
         ]
+        shapes.masked = true
 
-        let doc = TimelineDocument(layers: [actions, art, props, shapes], totalFrames: 3)
+        let mask = TLLayer(name: "mask", swatch: .gray, kind: .mask, indent: 0, frames: [.keyframe(hasScript: false), .empty, .empty])
+        mask.shapeFrames[1] = PlacedShape(kind: .rectangle, x: 0, y: 0, width: 60, height: 30)
+
+        let grouped = TLLayer(name: "grouped", swatch: .purple, indent: 0, frames: [.keyframe(hasScript: false), .empty, .empty])
+        grouped.groupFrames[1] = PlacedGroup(
+            x: 20, y: 30, width: 40, height: 20, rotation: 15, opacity: 0.9,
+            texts: [PlacedText(text: "hi", x: 0, y: 0, width: 20, height: 10)],
+            shapes: [PlacedShape(kind: .ellipse, x: 20, y: 0, width: 20, height: 20, fillColorHex: "#ABCDEF")]
+        )
+
+        let doc = TimelineDocument(layers: [actions, art, props, mask, shapes, grouped], totalFrames: 3)
         doc.library = [symbol]
         doc.stageWidth = 320
         doc.stageHeight = 180
@@ -208,6 +219,102 @@ enum DocumentFixtures {
         doc.stageWidth = 200
         doc.stageHeight = 100
         doc.stageColor = .white
+        doc.fps = 8
+        return doc
+    }
+
+    /// A rounded rectangle with a dashed stroke — exercises player.js's
+    /// `cornerRadius`/`strokeStyle` CSS output (`shapeBorderRadius`/
+    /// `el.style.borderStyle`) specifically.
+    static func roundedDashedShape() -> TimelineDocument {
+        let layer = TLLayer(name: "rect", swatch: .blue, frames: [.keyframe(hasScript: false)])
+        var shape = PlacedShape(
+            kind: .rectangle, x: 10, y: 10, width: 60, height: 40,
+            fillColorHex: "#3399FF", fillOpacity: 1, strokeColorHex: "#000000", strokeOpacity: 1, strokeWidth: 3
+        )
+        shape.cornerRadius = 12
+        shape.strokeStyle = .dashed
+        layer.shapeFrames[1] = shape
+        let doc = TimelineDocument(layers: [layer], totalFrames: 1)
+        doc.stageWidth = 100
+        doc.stageHeight = 60
+        doc.stageColor = .white
+        doc.fps = 8
+        return doc
+    }
+
+    /// A mask layer (small rectangle) clipping a masked layer (a full-Stage
+    /// red rectangle) — mirrors GIFExportTests'
+    /// testMaskedShapeOnlyRevealsContentWithinTheMaskBoundsInGIFExport,
+    /// for exercising player.js's clip-path masking instead.
+    static func maskedShape() -> TimelineDocument {
+        let mask = TLLayer(name: "mask", swatch: .gray, kind: .mask, frames: [.keyframe(hasScript: false)])
+        mask.shapeFrames[1] = PlacedShape(kind: .rectangle, x: 5, y: 5, width: 10, height: 10)
+
+        let content = TLLayer(name: "content", swatch: .red, frames: [.keyframe(hasScript: false)])
+        content.masked = true
+        content.shapeFrames[1] = PlacedShape(
+            kind: .rectangle, x: 0, y: 0, width: 20, height: 20,
+            fillColorHex: "#FF0000", fillOpacity: 1, strokeColorHex: "#FF0000", strokeOpacity: 1, strokeWidth: 0
+        )
+
+        let doc = TimelineDocument(layers: [mask, content], totalFrames: 1)
+        doc.stageWidth = 20
+        doc.stageHeight = 20
+        doc.stageColor = .white
+        doc.fps = 8
+        return doc
+    }
+
+    /// A group bundling two shapes side by side — mirrors GIFExportTests'
+    /// testGroupRendersAllBundledChildrenInGIFExport, for exercising
+    /// player.js's group rendering (createGroupVisual) instead.
+    static func groupedShapes() -> TimelineDocument {
+        let layer = TLLayer(name: "art", swatch: .green, frames: [.keyframe(hasScript: false)])
+        layer.groupFrames[1] = PlacedGroup(
+            x: 5, y: 5, width: 20, height: 20,
+            shapes: [
+                PlacedShape(kind: .rectangle, x: 0, y: 0, width: 10, height: 20, fillColorHex: "#FF0000", fillOpacity: 1, strokeWidth: 0),
+                PlacedShape(kind: .rectangle, x: 10, y: 0, width: 10, height: 20, fillColorHex: "#0000FF", fillOpacity: 1, strokeWidth: 0)
+            ]
+        )
+        let doc = TimelineDocument(layers: [layer], totalFrames: 1)
+        doc.stageWidth = 30
+        doc.stageHeight = 30
+        doc.stageColor = .white
+        doc.fps = 8
+        return doc
+    }
+
+    /// A single shape tweened left-to-right (position/size group, quad
+    /// ease-out) while independently fading in fill/stroke color+opacity
+    /// and growing its stroke width from 0 (color group, linear) — mirrors
+    /// `tweenedText()` but exercising `interpolatedPlacedShape`'s two
+    /// independently-eased groups instead of text's.
+    static func tweenedShape() -> TimelineDocument {
+        let totalFrames = 10
+        var frames = [FrameMark](repeating: .tween, count: totalFrames)
+        frames[0] = .keyframe(hasScript: false)
+        frames[totalFrames - 1] = .keyframe(hasScript: false)
+
+        let layer = TLLayer(name: "shape", swatch: .green, frames: frames)
+        layer.shapeFrames[1] = PlacedShape(
+            kind: .rectangle, x: 4, y: 4, width: 40, height: 20,
+            fillColorHex: "#000000", fillOpacity: 0, strokeColorHex: "#000000", strokeOpacity: 0,
+            strokeWidth: 0, opacity: 0
+        )
+        layer.shapeFrames[totalFrames] = PlacedShape(
+            kind: .rectangle, x: 40, y: 4, width: 40, height: 20,
+            fillColorHex: "#FFFFFF", fillOpacity: 1, strokeColorHex: "#FFFFFF", strokeOpacity: 1,
+            strokeWidth: 10, opacity: 1
+        )
+        layer.tweenSettings[1] = TweenSettings(family: .quad, direction: .easeOut, amount: 100)
+        layer.colorTweenSettings[1] = TweenSettings(family: .linear)
+
+        let doc = TimelineDocument(layers: [layer], totalFrames: totalFrames)
+        doc.stageWidth = 110
+        doc.stageHeight = 32
+        doc.stageColor = .black
         doc.fps = 8
         return doc
     }

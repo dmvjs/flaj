@@ -23,6 +23,7 @@
   const textLayerEl = document.getElementById('flaj-text-layer');
   const objectsLayerEl = document.getElementById('flaj-objects-layer');
   const shapesLayerEl = document.getElementById('flaj-shapes-layer');
+  const groupsLayerEl = document.getElementById('flaj-groups-layer');
 
   let stageWidth = doc.stageWidth;
   let stageHeight = doc.stageHeight;
@@ -66,6 +67,106 @@
       return null;
     }
     return null;
+  }
+
+  // ---- masking (mirrors TimelineDocument.maskingLayer(for:) in TimelineModel.swift) ----
+  // `LayerKind`'s synthesized Codable encodes a plain case as a one-key
+  // object (e.g. `{"mask": {}}`), never a bare string — layerKind() reads
+  // that key back out.
+
+  function layerKind(layer) {
+    return layer.kind ? Object.keys(layer.kind)[0] : 'normal';
+  }
+
+  /// The mask layer currently clipping `doc.layers[layerIndex]`, walking
+  /// layers in their real Timeline order exactly like the Swift original
+  /// — `null` for a mask layer itself, for `masked: false`, or once a
+  /// non-masked layer has broken the run back to the nearest mask above.
+  function maskingLayerFor(layerIndex) {
+    let activeMask = null;
+    for (let i = 0; i < doc.layers.length; i++) {
+      const l = doc.layers[i];
+      if (layerKind(l) === 'mask') {
+        activeMask = l;
+      } else if (!l.masked) {
+        activeMask = null;
+      }
+      if (i === layerIndex) return layerKind(l) === 'mask' ? null : activeMask;
+    }
+    return null;
+  }
+
+  // Web export v1 only supports a shape-sourced mask (rectangle/ellipse) —
+  // a text- or symbol-sourced mask is a native-Stage/GIF-export-only
+  // capability for now (see PropertiesPanelView/StageView's own doc
+  // comments on "most basic first" scoping elsewhere in this codebase).
+  // Returns null (mask skipped, content renders unclipped) when the mask
+  // layer's *current* governing keyframe isn't a shape.
+  function maskShapeGeometryAtFrame(maskLayer, frame) {
+    const kf = governingKeyframe(maskLayer.frames, Math.floor(frame));
+    const base = kf != null && maskLayer.shapeFrames && maskLayer.shapeFrames[kf];
+    if (!base) return null;
+    const endKf = tweenTarget(maskLayer.frames, kf);
+    const end = endKf != null ? maskLayer.shapeFrames[endKf] : null;
+    if (!end || endKf <= kf) return base;
+    const rawT = (frame - kf) / (endKf - kf);
+    const t = easedProgress(maskLayer.tweenSettings[kf], rawT);
+    return {
+      kind: base.kind,
+      x: base.x + (end.x - base.x) * t,
+      y: base.y + (end.y - base.y) * t,
+      width: base.width + (end.width - base.width) * t,
+      height: base.height + (end.height - base.height) * t,
+      cornerRadius: base.cornerRadius + ((end.cornerRadius || 0) - (base.cornerRadius || 0)) * t
+    };
+  }
+
+  function clipPathFor(shape) {
+    if (shape.kind === 'ellipse') {
+      return `ellipse(${shape.width / 2}px ${shape.height / 2}px at ${shape.x + shape.width / 2}px ${shape.y + shape.height / 2}px)`;
+    }
+    const inset = `inset(${shape.y}px ${stageWidth - (shape.x + shape.width)}px ${stageHeight - (shape.y + shape.height)}px ${shape.x}px`;
+    return shape.cornerRadius ? `${inset} round ${shape.cornerRadius}px)` : `${inset})`;
+  }
+
+  // A masked layer's element lives inside a full-Stage-sized wrapper
+  // (`inset: 0`, same coordinate frame as the Stage itself) rather than
+  // directly in its usual layer container — that's what lets `clipPathFor`
+  // express the mask's geometry in plain Stage-pixel coordinates instead
+  // of needing to translate into the masked element's own, independently
+  // positioned/tweened local box. Recomputed every tick in syncMaskWraps
+  // (below) rather than as a Web Animation of its own: the mask's geometry
+  // and the masked content's geometry can tween independently and on
+  // different spans, and a masked layer's *default* container can itself
+  // change (text vs. shape), both easier to keep correct with a plain
+  // per-tick recompute than by trying to model it as WAAPI keyframes.
+  const layerMaskWraps = new Map(); // layerIndex -> wrapper div
+
+  function maskAwareParent(layerIndex, defaultParent) {
+    const mask = maskingLayerFor(layerIndex);
+    if (!mask) {
+      const existing = layerMaskWraps.get(layerIndex);
+      if (existing) { existing.remove(); layerMaskWraps.delete(layerIndex); }
+      return defaultParent;
+    }
+    let wrap = layerMaskWraps.get(layerIndex);
+    if (!wrap) {
+      wrap = document.createElement('div');
+      wrap.className = 'flaj-mask-wrap';
+      layerMaskWraps.set(layerIndex, wrap);
+    }
+    if (wrap.parentElement !== defaultParent) defaultParent.appendChild(wrap);
+    return wrap;
+  }
+
+  function syncMaskWraps(frame) {
+    for (let i = 0; i < doc.layers.length; i++) {
+      const mask = maskingLayerFor(i);
+      const wrap = layerMaskWraps.get(i);
+      if (!wrap) continue; // nothing currently rendered under this layer needs clipping
+      const shape = mask ? maskShapeGeometryAtFrame(mask, frame) : null;
+      wrap.style.clipPath = shape ? clipPathFor(shape) : 'none';
+    }
   }
 
   function contentLength() {
@@ -342,12 +443,12 @@
   /// concurrent `animate()` calls on the same element (exactly what the Web
   /// Animations API is for), not one animation forced to share a curve
   /// across unrelated properties.
-  function createLayerVisual(layer, kf) {
+  function createLayerVisual(layer, kf, layerIndex) {
     const base = resolvePlacement(layer, kf);
     const el = document.createElement('div');
     el.className = 'flaj-text';
     applyStaticTextStyle(el, base);
-    textLayerEl.appendChild(el);
+    maskAwareParent(layerIndex, textLayerEl).appendChild(el);
 
     const endKf = tweenTarget(layer.frames, kf);
     const end = endKf != null ? resolvePlacement(layer, endKf) : null;
@@ -504,49 +605,197 @@
     el.style.transform = `scale(${instance.scale * content.scale}) rotate(${instance.rotation + content.rotation}deg)`;
   }
 
-  // ---- shapes (mirrors StagePlacedShapeView in StageView.swift) ----
-  // Shapes aren't tweenable in v1 (see PlacedShape's own doc comment in
-  // StageObject.swift) — no Web Animation needed, just a plain div
-  // re-styled whenever its governing keyframe changes, same idiom as
-  // createLayerVisual's own untweened (`else`) branch.
-
-  function applyShapeStyle(el, shape) {
-    el.style.left = shape.x + 'px';
-    el.style.top = shape.y + 'px';
-    el.style.width = shape.width + 'px';
-    el.style.height = shape.height + 'px';
-    el.style.backgroundColor = hexWithAlpha(shape.fillColorHex, shape.fillOpacity);
-    el.style.borderStyle = shape.strokeWidth > 0 ? 'solid' : 'none';
-    el.style.borderWidth = shape.strokeWidth + 'px';
-    el.style.borderColor = hexWithAlpha(shape.strokeColorHex, shape.strokeOpacity);
-    el.style.borderRadius = shape.kind === 'ellipse' ? '50%' : '0';
-    el.style.opacity = String(shape.opacity);
-  }
+  // ---- shapes (mirrors StagePlacedShapeView/TLLayer.interpolatedPlacedShape) ----
+  // Tweenable exactly like placed text — two independent Web Animations
+  // per span (position/size/strokeWidth/cornerRadius on the box curve,
+  // fill/stroke color and every opacity on the color curve), same split
+  // createLayerVisual already uses. `kind` (rectangle vs. ellipse) and
+  // `strokeStyle` (solid/dashed/dotted) never interpolate, so both are
+  // set once at element-creation time, not part of either animated
+  // keyframe set — border-radius still needs computing per shape though,
+  // since an ellipse's 50% and a rectangle's cornerRadius-in-px are two
+  // different animatable values, not a fixed constant like borderStyle.
 
   function hexWithAlpha(hex, opacity) {
     const [r, g, b] = hexComponents(hex);
     return `rgba(${r}, ${g}, ${b}, ${opacity})`;
   }
 
-  const layerShapeVisuals = new Map(); // layerIndex -> { kf, element }
+  function shapeBorderRadius(shape) {
+    return shape.kind === 'ellipse' ? '50%' : (shape.cornerRadius + 'px');
+  }
 
-  function syncShapeVisual(layerIndex, layer, kf) {
-    const shape = layer.shapeFrames[kf];
+  function shapeBoxKeyframe(shape) {
+    return {
+      left: shape.x + 'px', top: shape.y + 'px',
+      width: shape.width + 'px', height: shape.height + 'px',
+      borderWidth: shape.strokeWidth + 'px',
+      borderRadius: shapeBorderRadius(shape)
+    };
+  }
+
+  function shapeColorKeyframe(shape) {
+    return {
+      backgroundColor: hexWithAlpha(shape.fillColorHex, shape.fillOpacity),
+      borderColor: hexWithAlpha(shape.strokeColorHex, shape.strokeOpacity),
+      opacity: String(shape.opacity)
+    };
+  }
+
+  const layerShapeVisuals = new Map(); // layerIndex -> { kf, element, animations }
+
+  function createShapeVisual(layer, kf, layerIndex) {
+    const base = layer.shapeFrames[kf];
+    const el = document.createElement('div');
+    el.className = 'flaj-shape';
+    el.style.borderStyle = base.strokeStyle; // CSS's own keyword values are literally "solid"/"dashed"/"dotted"
+    maskAwareParent(layerIndex, shapesLayerEl).appendChild(el);
+
+    const endKf = tweenTarget(layer.frames, kf);
+    const end = endKf != null ? layer.shapeFrames[endKf] : null;
+    const animations = [];
+
+    if (endKf != null && end && endKf > kf) {
+      const durationMs = ((endKf - kf) / fps) * 1000;
+      const boxAnimation = el.animate(
+        [shapeBoxKeyframe(base), shapeBoxKeyframe(end)],
+        { duration: durationMs, easing: cssEasingForTween(layer.tweenSettings[kf]), fill: 'both' }
+      );
+      boxAnimation.pause();
+      animations.push(boxAnimation);
+
+      const colorAnimation = el.animate(
+        [shapeColorKeyframe(base), shapeColorKeyframe(end)],
+        { duration: durationMs, easing: cssEasingForTween(layer.colorTweenSettings[kf]), fill: 'both' }
+      );
+      colorAnimation.pause();
+      animations.push(colorAnimation);
+    } else {
+      Object.assign(el.style, shapeBoxKeyframe(base), shapeColorKeyframe(base));
+    }
+
+    return { kf, element: el, animations };
+  }
+
+  // Same reuse-vs-recreate/time-sync/play-pause logic as syncLayerVisual's
+  // own text path — see its doc comment for why forceTimeSync exists.
+  function syncShapeVisual(layerIndex, layer, kf, frame, forceTimeSync) {
     let visual = layerShapeVisuals.get(layerIndex);
     if (!visual || visual.kf !== kf) {
-      if (visual) visual.element.remove();
-      const el = document.createElement('div');
-      el.className = 'flaj-shape';
-      shapesLayerEl.appendChild(el);
-      visual = { kf, element: el };
+      if (visual) { visual.animations.forEach(a => a.cancel()); visual.element.remove(); }
+      visual = createShapeVisual(layer, kf, layerIndex);
       layerShapeVisuals.set(layerIndex, visual);
+      forceTimeSync = true;
     }
-    applyShapeStyle(visual.element, shape);
+    for (const animation of visual.animations) {
+      if (forceTimeSync) animation.currentTime = ((frame - kf) / fps) * 1000;
+      if (isPlaying) {
+        if (animation.playState !== 'running') animation.play();
+      } else if (animation.playState === 'running') {
+        animation.pause();
+      }
+    }
   }
 
   function removeShapeVisual(layerIndex) {
     const visual = layerShapeVisuals.get(layerIndex);
-    if (visual) { visual.element.remove(); layerShapeVisuals.delete(layerIndex); }
+    if (visual) { visual.animations.forEach(a => a.cancel()); visual.element.remove(); layerShapeVisuals.delete(layerIndex); }
+  }
+
+  // ---- groups (mirrors StagePlacedGroupView in StageView.swift) ----
+  // Not tweenable in v1 (see PlacedGroup's own doc comment) — a plain div
+  // per governing keyframe, rebuilt whenever the keyframe changes, same
+  // idiom shapes originally used before shape tweening existed. Renders
+  // every bundled text/shape/symbol child at its own position relative to
+  // the group's own origin. A nested symbol's independent loop is only
+  // resolved once, at the moment this element is built, not kept
+  // per-tick current the way a top-level symbol instance is — a real,
+  // documented web-export-only limitation (the native Stage/GIF export
+  // path re-resolves it every frame via `doc.playhead` reactively;
+  // matching that here would mean per-tick DOM updates for every group
+  // with a nested symbol, out of scope for v1's "groups are static"
+  // starting point).
+
+  const layerGroupVisuals = new Map(); // layerIndex -> { kf, element }
+
+  function appendGroupShapeChild(container, shape) {
+    const el = document.createElement('div');
+    el.className = 'flaj-shape';
+    el.style.left = shape.x + 'px';
+    el.style.top = shape.y + 'px';
+    el.style.width = shape.width + 'px';
+    el.style.height = shape.height + 'px';
+    el.style.backgroundColor = hexWithAlpha(shape.fillColorHex, shape.fillOpacity);
+    el.style.borderStyle = shape.strokeStyle;
+    el.style.borderWidth = shape.strokeWidth + 'px';
+    el.style.borderColor = hexWithAlpha(shape.strokeColorHex, shape.strokeOpacity);
+    el.style.borderRadius = shapeBorderRadius(shape);
+    el.style.opacity = String(shape.opacity);
+    container.appendChild(el);
+  }
+
+  function appendGroupTextChild(container, text) {
+    const el = document.createElement('div');
+    el.className = 'flaj-text';
+    applyStaticTextStyle(el, text);
+    el.style.left = text.x + 'px';
+    el.style.top = text.y + 'px';
+    el.style.width = text.width + 'px';
+    el.style.height = text.height + 'px';
+    el.style.color = text.colorHex;
+    el.style.opacity = String(text.opacity);
+    el.style.transform = `scale(${text.scale}) rotate(${text.rotation}deg)`;
+    container.appendChild(el);
+  }
+
+  function appendGroupSymbolChild(container, instance, frame, groupKf) {
+    const symbol = findSymbol(instance.symbolID);
+    const layer = symbol && symbol.layers && symbol.layers[0];
+    if (!layer) return;
+    const local = symbolLocalFrame(symbol, frame, groupKf);
+    const content = interpolatedSymbolContent(layer, local);
+    if (!content) return;
+    const el = document.createElement('div');
+    el.className = 'flaj-text';
+    applyStaticTextStyle(el, content);
+    el.style.left = instance.x + 'px';
+    el.style.top = instance.y + 'px';
+    el.style.width = instance.width + 'px';
+    el.style.height = instance.height + 'px';
+    el.style.color = content.colorHex;
+    el.style.opacity = String(instance.opacity * content.opacity);
+    el.style.transform = `scale(${instance.scale * content.scale}) rotate(${instance.rotation + content.rotation}deg)`;
+    container.appendChild(el);
+  }
+
+  function createGroupVisual(layer, kf, frame) {
+    const group = layer.groupFrames[kf];
+    const el = document.createElement('div');
+    el.className = 'flaj-group';
+    el.style.left = group.x + 'px';
+    el.style.top = group.y + 'px';
+    el.style.width = group.width + 'px';
+    el.style.height = group.height + 'px';
+    el.style.opacity = String(group.opacity);
+    el.style.transform = `rotate(${group.rotation}deg)`;
+    (group.shapes || []).forEach(s => appendGroupShapeChild(el, s));
+    (group.texts || []).forEach(t => appendGroupTextChild(el, t));
+    (group.symbols || []).forEach(s => appendGroupSymbolChild(el, s, frame, kf));
+    groupsLayerEl.appendChild(el);
+    return { kf, element: el };
+  }
+
+  function syncGroupVisual(layerIndex, layer, kf, frame) {
+    const visual = layerGroupVisuals.get(layerIndex);
+    if (!visual || visual.kf !== kf) {
+      if (visual) visual.element.remove();
+      layerGroupVisuals.set(layerIndex, createGroupVisual(layer, kf, frame));
+    }
+  }
+
+  function removeGroupVisual(layerIndex) {
+    const visual = layerGroupVisuals.get(layerIndex);
+    if (visual) { visual.element.remove(); layerGroupVisuals.delete(layerIndex); }
   }
 
   /// Makes sure `layerIndex` is showing the right span for `frame` (an
@@ -555,22 +804,45 @@
   /// span hasn't changed and `forceTimeSync` isn't set — that's what leaves
   /// in-progress motion alone to keep running on its own native clock.
   function syncLayerVisual(layerIndex, layer, frame, forceTimeSync) {
+    // A mask layer's own content is never drawn directly on Stage — only
+    // used as a clip stencil (see maskingLayerFor/syncMaskWraps) for
+    // whatever it masks, mirroring StageContentView's identical skip.
+    if (layerKind(layer) === 'mask') {
+      const existing = layerVisuals.get(layerIndex);
+      if (existing) { existing.animations.forEach(a => a.cancel()); existing.element.remove(); layerVisuals.delete(layerIndex); }
+      removeShapeVisual(layerIndex);
+      removeGroupVisual(layerIndex);
+      return;
+    }
+
     const kf = governingKeyframe(layer.frames, Math.floor(frame));
 
-    // A shape keyframe is mutually exclusive with text/symbol content on
-    // the same layer (see TLLayer in TimelineModel.swift) — handled
-    // entirely separately from the Web-Animation machinery below, which a
-    // shape never needs (see PlacedShape's own doc comment on why it isn't
-    // tweenable in v1).
+    // A shape/group keyframe is mutually exclusive with text/symbol
+    // content on the same layer (see TLLayer in TimelineModel.swift) —
+    // handled entirely separately from the text/symbol Web-Animation
+    // machinery below (own animations, own visuals map), via
+    // createShapeVisual/syncShapeVisual and createGroupVisual/
+    // syncGroupVisual above.
     const shape = kf != null && layer.shapeFrames && layer.shapeFrames[kf];
     if (shape) {
       const existingText = layerVisuals.get(layerIndex);
       if (existingText) { existingText.animations.forEach(a => a.cancel()); existingText.element.remove(); layerVisuals.delete(layerIndex); }
+      removeGroupVisual(layerIndex);
       if (layer.hidden) { removeShapeVisual(layerIndex); return; }
-      syncShapeVisual(layerIndex, layer, kf);
+      syncShapeVisual(layerIndex, layer, kf, frame, forceTimeSync);
       return;
     }
     removeShapeVisual(layerIndex);
+
+    const group = kf != null && layer.groupFrames && layer.groupFrames[kf];
+    if (group) {
+      const existingText = layerVisuals.get(layerIndex);
+      if (existingText) { existingText.animations.forEach(a => a.cancel()); existingText.element.remove(); layerVisuals.delete(layerIndex); }
+      if (layer.hidden) { removeGroupVisual(layerIndex); return; }
+      syncGroupVisual(layerIndex, layer, kf, frame);
+      return;
+    }
+    removeGroupVisual(layerIndex);
 
     const existing = layerVisuals.get(layerIndex);
 
@@ -589,7 +861,7 @@
     let visual = existing;
     if (!visual || visual.kf !== kf) {
       if (visual) { visual.animations.forEach(a => a.cancel()); visual.element.remove(); }
-      visual = createLayerVisual(layer, kf);
+      visual = createLayerVisual(layer, kf, layerIndex);
       layerVisuals.set(layerIndex, visual);
       forceTimeSync = true; // a freshly created span always needs its clock set once
     }
@@ -607,6 +879,7 @@
 
   function syncAllLayerVisuals(frame, forceTimeSync) {
     doc.layers.forEach((layer, i) => syncLayerVisual(i, layer, frame, forceTimeSync));
+    syncMaskWraps(frame);
   }
 
   // ---- stage (script-created) objects ----

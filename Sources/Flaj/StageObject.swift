@@ -168,6 +168,16 @@ enum ShapeKind: String, Codable, CaseIterable {
     case rectangle, ellipse
 }
 
+/// A rectangle's stroke dash pattern — real Flash's Stroke Style menu has
+/// six variable-width styles plus Hairline; scoped here to the two
+/// cheapest, most commonly used ones (solid stays the default). Named
+/// `StrokeDashStyle` rather than `StrokeStyle` to avoid colliding with
+/// SwiftUI's own `StrokeStyle` type, which every rendering call site here
+/// also needs to reference directly (for the actual dash-array values).
+enum StrokeDashStyle: String, Codable, CaseIterable {
+    case solid, dashed, dotted
+}
+
 /// A vector-drawing-tool placement — Rectangle/Ellipse for now (see
 /// ToolbarView's own doc comment on why just these two), tied to a
 /// specific (layer, keyframe) exactly like `PlacedText`, and just as
@@ -176,12 +186,12 @@ enum ShapeKind: String, Codable, CaseIterable {
 /// each is always one discrete, always-selectable-as-a-unit placement,
 /// same object model `PlacedText`/`SymbolInstance` already use.
 ///
-/// Deliberately not tweenable yet (no `interpolatedPlacedShape` — a
-/// keyframe holding only a shape can't even start Create Tween, see
-/// `createTween`'s own content gate) — same tier `DropShadowFilter`/`Glow
-/// Filter` started at before this session's tween work existed for them
-/// either; geometry/fill/stroke easing across a span is a natural, bounded
-/// follow-up once shapes themselves are solid.
+/// Tweenable like `PlacedText`/`SymbolInstance` — see `TLLayer.
+/// interpolatedPlacedShape` for the two independently-eased groups
+/// (position/size/strokeWidth/cornerRadius vs. fill/stroke color and
+/// every opacity). `kind` and `strokeStyle` never interpolate — a
+/// rectangle doesn't morph into an ellipse mid-tween, and a dash pattern
+/// has no meaningful "halfway" state the way a numeric value does.
 struct PlacedShape: Codable, Equatable {
     var kind: ShapeKind = .rectangle
     var x: CGFloat
@@ -193,6 +203,12 @@ struct PlacedShape: Codable, Equatable {
     var strokeColorHex: String = "#000000"
     var strokeOpacity: Double = 1
     var strokeWidth: CGFloat = 2
+    var strokeStyle: StrokeDashStyle = .solid
+    /// Only meaningful when `kind == .rectangle` (an ellipse has no
+    /// corners) — real Flash's Rectangle Primitive tool's adjustable
+    /// per-corner radius, simplified here to one radius for all four
+    /// corners rather than four independent ones.
+    var cornerRadius: CGFloat = 0
     /// The whole shape's own opacity — independent of, and compounds
     /// with, fill/stroke's own opacity, same relationship `PlacedText.
     /// opacity` has to nothing-in-particular (it has no separate fill/
@@ -203,7 +219,8 @@ struct PlacedShape: Codable, Equatable {
 
     init(kind: ShapeKind = .rectangle, x: CGFloat, y: CGFloat, width: CGFloat = 100, height: CGFloat = 100,
          fillColorHex: String = "#3399FF", fillOpacity: Double = 1, strokeColorHex: String = "#000000",
-         strokeOpacity: Double = 1, strokeWidth: CGFloat = 2, opacity: Double = 1) {
+         strokeOpacity: Double = 1, strokeWidth: CGFloat = 2, strokeStyle: StrokeDashStyle = .solid,
+         cornerRadius: CGFloat = 0, opacity: Double = 1) {
         self.kind = kind
         self.x = x
         self.y = y
@@ -214,19 +231,19 @@ struct PlacedShape: Codable, Equatable {
         self.strokeColorHex = strokeColorHex
         self.strokeOpacity = strokeOpacity
         self.strokeWidth = strokeWidth
+        self.strokeStyle = strokeStyle
+        self.cornerRadius = cornerRadius
         self.opacity = opacity
     }
 
     private enum CodingKeys: String, CodingKey {
-        case kind, x, y, width, height, fillColorHex, fillOpacity, strokeColorHex, strokeOpacity, strokeWidth, opacity
+        case kind, x, y, width, height, fillColorHex, fillOpacity, strokeColorHex, strokeOpacity, strokeWidth,
+             strokeStyle, cornerRadius, opacity
     }
 
     // Same decodeIfPresent-with-each-field's-own-default idiom as
-    // PlacedText's custom decoder — there's no "legacy" shape shape yet
-    // (this is the first version), but every other placed-content type in
-    // this file follows this pattern for whenever a field gets added
-    // later, so this one starts the same way rather than needing a
-    // retrofit the first time that happens.
+    // PlacedText's custom decoder — keeps older .flaj files (saved before
+    // strokeStyle/cornerRadius existed) opening exactly as they did.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         kind = try c.decodeIfPresent(ShapeKind.self, forKey: .kind) ?? .rectangle
@@ -239,7 +256,72 @@ struct PlacedShape: Codable, Equatable {
         strokeColorHex = try c.decodeIfPresent(String.self, forKey: .strokeColorHex) ?? "#000000"
         strokeOpacity = try c.decodeIfPresent(Double.self, forKey: .strokeOpacity) ?? 1
         strokeWidth = try c.decodeIfPresent(CGFloat.self, forKey: .strokeWidth) ?? 2
+        strokeStyle = try c.decodeIfPresent(StrokeDashStyle.self, forKey: .strokeStyle) ?? .solid
+        cornerRadius = try c.decodeIfPresent(CGFloat.self, forKey: .cornerRadius) ?? 0
         opacity = try c.decodeIfPresent(Double.self, forKey: .opacity) ?? 1
+    }
+}
+
+/// Illustrator/Flash's Group — genuinely distinct from a Symbol: a
+/// lightweight, non-reusable bundle of placements that just moves/resizes
+/// as one unit, not a Library asset with its own independent Timeline
+/// (compare `FlajSymbol` below). `texts`/`shapes`/`symbols` each carry
+/// their own full feature set unchanged (filters, color, per-symbol
+/// transform, etc.) — only their `x`/`y` mean something different here:
+/// relative to the group's own (0,0) origin (its own `x`/`y`), not
+/// absolute Stage coordinates.
+///
+/// v1 is deliberately an opaque unit once grouped: there's no
+/// double-click-to-enter-and-edit-one-member mode the way a symbol has
+/// edit-in-place — that would need a genuinely separate "flat, no nested
+/// Timeline" editing scope, real but sizable scope beyond move/resize/
+/// Ungroup. Editing one member for now means Ungroup, edit, re-group.
+/// Resizing scales every child's own x/y/width/height (and a shape's
+/// strokeWidth) directly, by the same ratio as the group's own box —
+/// not a separate multiplicative `scale` factor the way `SymbolInstance`
+/// has one, since that would need distinguishing "design size" from
+/// "current size" for no real benefit at this scope. `rotation`/`opacity`
+/// stay as simple whole-group modifiers, same idiom `SymbolInstance`
+/// already uses for those two.
+struct PlacedGroup: Codable, Equatable {
+    var x: CGFloat
+    var y: CGFloat
+    var width: CGFloat
+    var height: CGFloat
+    var rotation: CGFloat = 0
+    var opacity: Double = 1
+    var texts: [PlacedText] = []
+    var shapes: [PlacedShape] = []
+    var symbols: [SymbolInstance] = []
+
+    private enum CodingKeys: String, CodingKey {
+        case x, y, width, height, rotation, opacity, texts, shapes, symbols
+    }
+
+    init(x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat, rotation: CGFloat = 0, opacity: Double = 1,
+         texts: [PlacedText] = [], shapes: [PlacedShape] = [], symbols: [SymbolInstance] = []) {
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.rotation = rotation
+        self.opacity = opacity
+        self.texts = texts
+        self.shapes = shapes
+        self.symbols = symbols
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        x = try c.decode(CGFloat.self, forKey: .x)
+        y = try c.decode(CGFloat.self, forKey: .y)
+        width = try c.decode(CGFloat.self, forKey: .width)
+        height = try c.decode(CGFloat.self, forKey: .height)
+        rotation = try c.decodeIfPresent(CGFloat.self, forKey: .rotation) ?? 0
+        opacity = try c.decodeIfPresent(Double.self, forKey: .opacity) ?? 1
+        texts = try c.decodeIfPresent([PlacedText].self, forKey: .texts) ?? []
+        shapes = try c.decodeIfPresent([PlacedShape].self, forKey: .shapes) ?? []
+        symbols = try c.decodeIfPresent([SymbolInstance].self, forKey: .symbols) ?? []
     }
 }
 

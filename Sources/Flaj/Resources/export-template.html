@@ -50,7 +50,7 @@
     overflow: hidden;
     transform-origin: top left;
   }
-  #flaj-text-layer, #flaj-objects-layer, #flaj-shapes-layer {
+  #flaj-text-layer, #flaj-objects-layer, #flaj-shapes-layer, #flaj-groups-layer {
     position: absolute;
     inset: 0;
   }
@@ -91,6 +91,25 @@
     position: absolute;
     box-sizing: border-box;
   }
+  /* Stage-sized (inset: 0, same coordinate frame as #flaj-stage itself) so
+     a masked element positioned inside it keeps its own ordinary absolute
+     Stage-pixel coordinates — see player.js's maskAwareParent/clipPathFor
+     for why that's what lets the mask's geometry apply as a plain
+     clip-path without translating into the masked element's own,
+     independently positioned/tweened local box. */
+  .flaj-mask-wrap {
+    position: absolute;
+    inset: 0;
+  }
+  /* Establishes the positioning context its bundled .flaj-shape/.flaj-text
+     children (each still absolutely positioned, per their own class rules
+     above) need to land relative to the group's own box rather than the
+     Stage's — see PlacedGroup's own doc comment on why children are
+     stored relative to the group's origin. */
+  .flaj-group {
+    position: absolute;
+    box-sizing: border-box;
+  }
 </style>
 </head>
 <body>
@@ -109,6 +128,7 @@
          comment), just a predictable default for the common case. -->
     <div id="flaj-objects-layer"></div>
     <div id="flaj-shapes-layer"></div>
+    <div id="flaj-groups-layer"></div>
     <div id="flaj-text-layer"></div>
   </div>
 </div>

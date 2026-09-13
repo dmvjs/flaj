@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import Observation
 import Dispatch
 import JavaScriptCore
@@ -42,7 +43,7 @@ enum FrameMark: Equatable, Codable {
 }
 
 enum LayerKind: Codable, Equatable {
-    case normal, folder
+    case normal, folder, mask
 }
 
 /// One line in the debug console — Flash's Output panel equivalent.
@@ -63,6 +64,12 @@ final class TLLayer: Identifiable {
     var indent: Int
     var locked: Bool
     var hidden: Bool
+    // Whether this layer is clipped by the nearest `.mask`-kind layer
+    // above it — see `TimelineDocument.maskingLayer(for:)` for the actual
+    // grouping rule (a contiguous run of `masked` layers directly below a
+    // mask layer, broken by the first non-masked one). Meaningless on a
+    // `.mask`-kind layer itself, which is never masked.
+    var masked: Bool = false
     var expanded: Bool = true
     var frames: [FrameMark]
     var frameScripts: [Int: String] = [:]   // 1-based frame number -> JS/TS source
@@ -77,6 +84,11 @@ final class TLLayer: Identifiable {
     // — same one-per-keyframe shape and mutual exclusivity as textFrames/
     // symbolFrames above.
     var shapeFrames: [Int: PlacedShape] = [:]
+    // A grouped bundle of placements (see PlacedGroup in StageObject.swift)
+    // — same one-per-keyframe shape and mutual exclusivity as the three
+    // above (a layer's content at any keyframe is exactly one of text/
+    // symbol instance/shape/group, never more than one at once).
+    var groupFrames: [Int: PlacedGroup] = [:]
     // Named keyframes — a navigation target for gotoAndPlay("name")/
     // gotoAndStop("name")/goto("name") from a frame script, matching
     // Flash's own frame labels. Purely a keyframe annotation, same
@@ -193,6 +205,43 @@ final class TLLayer: Identifiable {
         result.rotation = base.rotation + (end.rotation - base.rotation) * t
         result.opacity = base.opacity + (end.opacity - base.opacity) * colorT
         return result
+    }
+
+    /// Same idea as `interpolatedPlacedText`/`interpolatedSymbolInstance` —
+    /// two independently-eased groups, same split as those two: position/
+    /// size (plus `strokeWidth`, geometric rather than a color) on the
+    /// position tween's own curve, fill/stroke color and every opacity on
+    /// the color tween's own curve. `kind` never interpolates (a rectangle
+    /// doesn't morph into an ellipse mid-tween).
+    func interpolatedPlacedShape(at frame: Int) -> PlacedShape? {
+        guard let kf = governingKeyframe(at: frame), let base = shapeFrames[kf] else { return nil }
+        guard let endKf = tweenTarget(from: kf), let end = shapeFrames[endKf], endKf > kf else { return base }
+        let rawT = Double(frame - kf) / Double(endKf - kf)
+        let t = (tweenSettings[kf] ?? TweenSettings()).easedProgress(rawT)
+        let colorT = (colorTweenSettings[kf] ?? TweenSettings()).easedProgress(rawT)
+        var result = base
+        result.x = base.x + (end.x - base.x) * t
+        result.y = base.y + (end.y - base.y) * t
+        result.width = base.width + (end.width - base.width) * t
+        result.height = base.height + (end.height - base.height) * t
+        result.strokeWidth = base.strokeWidth + (end.strokeWidth - base.strokeWidth) * t
+        result.cornerRadius = base.cornerRadius + (end.cornerRadius - base.cornerRadius) * t
+        result.fillOpacity = base.fillOpacity + (end.fillOpacity - base.fillOpacity) * colorT
+        result.strokeOpacity = base.strokeOpacity + (end.strokeOpacity - base.strokeOpacity) * colorT
+        result.opacity = base.opacity + (end.opacity - base.opacity) * colorT
+        result.fillColorHex = Self.interpolateHex(base.fillColorHex, end.fillColorHex, colorT)
+        result.strokeColorHex = Self.interpolateHex(base.strokeColorHex, end.strokeColorHex, colorT)
+        return result
+    }
+
+    /// Groups aren't tweenable in v1 (see `PlacedGroup`'s own doc comment
+    /// on its scope) — a group's value at any frame in its span is always
+    /// just its governing keyframe's own value, unchanged. Same tier
+    /// `PlacedShape` itself started at before this session's shape-tween
+    /// work existed.
+    func interpolatedPlacedGroup(at frame: Int) -> PlacedGroup? {
+        guard let kf = governingKeyframe(at: frame) else { return nil }
+        return groupFrames[kf]
     }
 
     /// Linearly interpolates two "#rrggbb" colors by `t` (0...1), channel by
@@ -344,31 +393,24 @@ final class TimelineDocument {
     /// silently hide it (text and tween sections are mutually exclusive).
     func selectFrame(layer: TLLayer, frame: Int, extend: Bool) {
         hasSelectedFrame = true
+        additionalSelectedPlacements.removeAll()
         if extend && selectedLayerID == layer.id {
-            selectedPlacement = nil
-            selectedSymbolPlacement = nil
-            selectedShapePlacement = nil
+            clearPrimarySelection()
             rangeSelectionEnd = frame
         } else {
             selectedLayerID = layer.id
             gotoAndStop(frame)
             rangeSelectionEnd = nil
             if layer.textFrames[frame] != nil {
-                selectedPlacement = TextPlacementRef(layerID: layer.id, keyframe: frame)
-                selectedSymbolPlacement = nil
-                selectedShapePlacement = nil
+                setPrimarySelection(.text(TextPlacementRef(layerID: layer.id, keyframe: frame)))
             } else if layer.symbolFrames[frame] != nil {
-                selectedSymbolPlacement = SymbolPlacementRef(layerID: layer.id, keyframe: frame)
-                selectedPlacement = nil
-                selectedShapePlacement = nil
+                setPrimarySelection(.symbol(SymbolPlacementRef(layerID: layer.id, keyframe: frame)))
             } else if layer.shapeFrames[frame] != nil {
-                selectedShapePlacement = ShapePlacementRef(layerID: layer.id, keyframe: frame)
-                selectedPlacement = nil
-                selectedSymbolPlacement = nil
+                setPrimarySelection(.shape(ShapePlacementRef(layerID: layer.id, keyframe: frame)))
+            } else if layer.groupFrames[frame] != nil {
+                setPrimarySelection(.group(GroupPlacementRef(layerID: layer.id, keyframe: frame)))
             } else {
-                selectedPlacement = nil
-                selectedSymbolPlacement = nil
-                selectedShapePlacement = nil
+                clearPrimarySelection()
             }
         }
     }
@@ -474,7 +516,7 @@ final class TimelineDocument {
     // MARK: - Text tool
 
     enum StageTool { case selection, text, rectangle, ellipse }
-    struct TextPlacementRef: Equatable {
+    struct TextPlacementRef: Hashable {
         let layerID: UUID; let keyframe: Int
         /// Undo-coalescing key (see `withUndoSnapshot`) — edits to the same
         /// placement collapse into one undo step regardless of which field
@@ -488,7 +530,7 @@ final class TimelineDocument {
 
     // MARK: - Symbol instances (Library placements)
 
-    struct SymbolPlacementRef: Equatable {
+    struct SymbolPlacementRef: Hashable {
         let layerID: UUID; let keyframe: Int
         var undoToken: String { "symbolplacement:\(layerID)-\(keyframe)" }
     }
@@ -538,9 +580,11 @@ final class TimelineDocument {
             layer.symbolFrames[kf] = instance
             layer.textFrames[kf] = nil
             layer.shapeFrames[kf] = nil
+            layer.groupFrames[kf] = nil
             selectedPlacement = nil
             selectedSymbolPlacement = SymbolPlacementRef(layerID: layer.id, keyframe: kf)
             selectedShapePlacement = nil
+            selectedGroupPlacement = nil
         }
     }
 
@@ -616,9 +660,11 @@ final class TimelineDocument {
             layer.symbolFrames[kf] = copied
             layer.textFrames[kf] = nil
             layer.shapeFrames[kf] = nil
+            layer.groupFrames[kf] = nil
             selectedSymbolPlacement = SymbolPlacementRef(layerID: layer.id, keyframe: kf)
             selectedPlacement = nil
             selectedShapePlacement = nil
+            selectedGroupPlacement = nil
         }
     }
 
@@ -684,12 +730,370 @@ final class TimelineDocument {
 
     // MARK: - Shape tool (vector drawing)
 
-    struct ShapePlacementRef: Equatable {
+    struct ShapePlacementRef: Hashable {
         let layerID: UUID; let keyframe: Int
         var undoToken: String { "shapeplacement:\(layerID)-\(keyframe)" }
     }
 
     var selectedShapePlacement: ShapePlacementRef?
+
+    // MARK: - Groups
+
+    struct GroupPlacementRef: Hashable {
+        let layerID: UUID; let keyframe: Int
+        var undoToken: String { "groupplacement:\(layerID)-\(keyframe)" }
+    }
+
+    var selectedGroupPlacement: GroupPlacementRef?
+
+    // MARK: - Multi-select
+
+    /// A type-erased reference to any one selectable Stage object,
+    /// regardless of content kind — what `selectedPlacements` (below) is a
+    /// `Set` of, since Swift has no way to put four unrelated struct
+    /// types in one collection otherwise.
+    enum StagePlacementRef: Hashable {
+        case text(TextPlacementRef)
+        case symbol(SymbolPlacementRef)
+        case shape(ShapePlacementRef)
+        case group(GroupPlacementRef)
+    }
+
+    // `selectedPlacement`/`selectedSymbolPlacement`/`selectedShapePlacement`
+    // above (plus `selectedGroupPlacement`, added alongside PlacedGroup)
+    // remain the single "primary" selection every existing call site
+    // already reads/writes directly — Properties panel single-object
+    // editing, creation, paste, and undo restore all keep working exactly
+    // as before, untouched by anything below. Shift/Cmd-click adds
+    // *additional* placements on top of that primary one, tracked here
+    // rather than replacing the whole selection model — a much smaller,
+    // lower-risk change than retrofitting every existing single-selection
+    // call site to go through a new unified path.
+    // Not `private`: Undo.swift (a separate file, same module) needs to
+    // reset this directly on restore — see its own doc comment there on
+    // why a multi-selection isn't otherwise validated/restored.
+    @ObservationIgnored var additionalSelectedPlacements: Set<StagePlacementRef> = []
+
+    /// The full current selection — the primary single ref(s) above plus
+    /// anything Shift/Cmd-clicked on top. Empty for no selection, exactly
+    /// one member for an ordinary single selection, more for a real
+    /// multi-select.
+    var selectedPlacements: Set<StagePlacementRef> {
+        var result = additionalSelectedPlacements
+        if let ref = selectedPlacement { result.insert(.text(ref)) }
+        if let ref = selectedSymbolPlacement { result.insert(.symbol(ref)) }
+        if let ref = selectedShapePlacement { result.insert(.shape(ref)) }
+        if let ref = selectedGroupPlacement { result.insert(.group(ref)) }
+        return result
+    }
+
+    /// Shift/Cmd-clicked an object — adds it to the selection if it wasn't
+    /// already part of it, or removes it if it was (the standard modifier-
+    /// click convention). The most recently *added* ref also becomes the
+    /// new primary selection (so Properties panel editing tracks whichever
+    /// object was just clicked), unless this click removed the primary
+    /// selection itself, in which case an arbitrary remaining member (if
+    /// any) is promoted to primary so the selection never silently keeps a
+    /// dangling primary ref.
+    func toggleSelection(_ ref: StagePlacementRef) {
+        if selectedPlacements.contains(ref) {
+            let wasPrimary = primaryRef == ref
+            removeFromSelection(ref)
+            if wasPrimary, let promoted = selectedPlacements.first {
+                setPrimarySelection(promoted)
+            }
+        } else {
+            // Each content kind has only one "primary" storage slot
+            // (selectedPlacement/selectedSymbolPlacement/etc.) —
+            // setPrimarySelection below would silently overwrite whatever
+            // was already primary if it happens to be the same kind as
+            // `ref` (e.g. selecting a second shape), so the old primary
+            // needs to move into `additionalSelectedPlacements` first to
+            // survive that overwrite.
+            if let oldPrimary = primaryRef {
+                additionalSelectedPlacements.insert(oldPrimary)
+            }
+            setPrimarySelection(ref)
+        }
+    }
+
+    /// A plain (non-modifier) click/tap — replaces the whole selection
+    /// with just `ref`.
+    func selectOnly(_ ref: StagePlacementRef) {
+        additionalSelectedPlacements.removeAll()
+        setPrimarySelection(ref)
+    }
+
+    func clearAllSelection() {
+        additionalSelectedPlacements.removeAll()
+        clearPrimarySelection()
+    }
+
+    /// The one entry point every placed-object tap gesture should call —
+    /// centralizes the Shift/Cmd-click-adds-to-selection convention so
+    /// each of StagePlacedTextView/StagePlacedShapeView/
+    /// StageSymbolInstanceView's own tap handler doesn't need to inspect
+    /// modifier keys itself.
+    func handleStageClick(_ ref: StagePlacementRef) {
+        if NSEvent.modifierFlags.contains(.shift) || NSEvent.modifierFlags.contains(.command) {
+            toggleSelection(ref)
+        } else {
+            selectOnly(ref)
+        }
+    }
+
+    /// The x/y of any one placement kind, type-erased — used only by a
+    /// multi-select drag (see StagePlacedTextView/StagePlacedShapeView/
+    /// StageSymbolInstanceView's own `moveGesture`) to snapshot where
+    /// every *other* selected object started before the drag began.
+    func positionOfPlacement(_ ref: StagePlacementRef) -> CGPoint? {
+        switch ref {
+        case .text(let r): return binding(for: r).map { CGPoint(x: $0.wrappedValue.x, y: $0.wrappedValue.y) }
+        case .symbol(let r): return binding(for: r).map { CGPoint(x: $0.wrappedValue.x, y: $0.wrappedValue.y) }
+        case .shape(let r): return binding(for: r).map { CGPoint(x: $0.wrappedValue.x, y: $0.wrappedValue.y) }
+        case .group(let r): return binding(for: r).map { CGPoint(x: $0.wrappedValue.x, y: $0.wrappedValue.y) }
+        }
+    }
+
+    /// Nudges any one placement kind by (dx, dy) — the generic form of
+    /// `nudgeSelectedPlacement`/`nudgeSelectedSymbolPlacement`/
+    /// `nudgeSelectedShapePlacement`, each of which only ever nudges its
+    /// own single primary ref. Used for a multi-selection's arrow-key
+    /// nudge (see `nudgeSelection` in StageView.swift), where every
+    /// selected object needs to move, not just the primary one.
+    func nudgePlacement(_ ref: StagePlacementRef, dx: CGFloat, dy: CGFloat) {
+        switch ref {
+        case .text(let r):
+            guard let b = binding(for: r) else { return }
+            b.wrappedValue.x += dx; b.wrappedValue.y += dy
+        case .symbol(let r):
+            guard let b = binding(for: r) else { return }
+            b.wrappedValue.x += dx; b.wrappedValue.y += dy
+        case .shape(let r):
+            guard let b = binding(for: r) else { return }
+            b.wrappedValue.x += dx; b.wrappedValue.y += dy
+        case .group(let r):
+            guard let b = binding(for: r) else { return }
+            b.wrappedValue.x += dx; b.wrappedValue.y += dy
+        }
+    }
+
+    /// Deletes any one placement kind — the generic form of
+    /// `deleteSelectedPlacement`/`deleteSelectedSymbolPlacement`/
+    /// `deleteSelectedShapePlacement`, for a multi-selection's Delete key.
+    func deletePlacement(_ ref: StagePlacementRef) {
+        switch ref {
+        case .text(let r):
+            guard let layer = layers.first(where: { $0.id == r.layerID }) else { return }
+            withUndoSnapshot { layer.textFrames[r.keyframe] = nil }
+            if selectedPlacement == r { selectedPlacement = nil }
+        case .symbol(let r):
+            guard let layer = layers.first(where: { $0.id == r.layerID }) else { return }
+            withUndoSnapshot { layer.symbolFrames[r.keyframe] = nil }
+            if selectedSymbolPlacement == r { selectedSymbolPlacement = nil }
+        case .shape(let r):
+            guard let layer = layers.first(where: { $0.id == r.layerID }) else { return }
+            withUndoSnapshot { layer.shapeFrames[r.keyframe] = nil }
+            if selectedShapePlacement == r { selectedShapePlacement = nil }
+        case .group(let r):
+            guard let layer = layers.first(where: { $0.id == r.layerID }) else { return }
+            withUndoSnapshot { layer.groupFrames[r.keyframe] = nil }
+            if selectedGroupPlacement == r { selectedGroupPlacement = nil }
+        }
+        additionalSelectedPlacements.remove(ref)
+    }
+
+    /// Moves every `(ref, startPosition)` pair to `startPosition + (dx,
+    /// dy)` — called every tick of a multi-select drag for every selected
+    /// object *other* than the one actually being dragged (that one keeps
+    /// using its own view's existing local liveDrag/onEnded-commit
+    /// pattern, untouched). Writing straight to the model on each tick
+    /// (rather than through a local preview) is what gives these other
+    /// objects live visual feedback for free — their own views already
+    /// just read this same model state reactively. Coalesced under one
+    /// shared undo token so the whole multi-drag's "everyone else" moves
+    /// collapse into a single undo step (the primary dragged object's own
+    /// final commit still lands as its own separate step — a known, minor
+    /// v1 imperfection rather than a correctness issue).
+    func moveOtherSelectedPlacements(_ starts: [StagePlacementRef: CGPoint], dx: CGFloat, dy: CGFloat) {
+        for (ref, start) in starts {
+            let newPosition = CGPoint(x: start.x + dx, y: start.y + dy)
+            withUndoSnapshot(coalesce: "multiselect-drag") {
+                switch ref {
+                case .text(let r): binding(for: r)?.wrappedValue.x = newPosition.x; binding(for: r)?.wrappedValue.y = newPosition.y
+                case .symbol(let r): binding(for: r)?.wrappedValue.x = newPosition.x; binding(for: r)?.wrappedValue.y = newPosition.y
+                case .shape(let r): binding(for: r)?.wrappedValue.x = newPosition.x; binding(for: r)?.wrappedValue.y = newPosition.y
+                case .group(let r): binding(for: r)?.wrappedValue.x = newPosition.x; binding(for: r)?.wrappedValue.y = newPosition.y
+                }
+            }
+        }
+    }
+
+    private var primaryRef: StagePlacementRef? {
+        if let ref = selectedPlacement { return .text(ref) }
+        if let ref = selectedSymbolPlacement { return .symbol(ref) }
+        if let ref = selectedShapePlacement { return .shape(ref) }
+        if let ref = selectedGroupPlacement { return .group(ref) }
+        return nil
+    }
+
+    private func setPrimarySelection(_ ref: StagePlacementRef) {
+        additionalSelectedPlacements.remove(ref)
+        switch ref {
+        case .text(let r):
+            selectedPlacement = r; selectedSymbolPlacement = nil; selectedShapePlacement = nil; selectedGroupPlacement = nil
+        case .symbol(let r):
+            selectedSymbolPlacement = r; selectedPlacement = nil; selectedShapePlacement = nil; selectedGroupPlacement = nil
+        case .shape(let r):
+            selectedShapePlacement = r; selectedPlacement = nil; selectedSymbolPlacement = nil; selectedGroupPlacement = nil
+        case .group(let r):
+            selectedGroupPlacement = r; selectedPlacement = nil; selectedSymbolPlacement = nil; selectedShapePlacement = nil
+        }
+    }
+
+    private func clearPrimarySelection() {
+        selectedPlacement = nil
+        selectedSymbolPlacement = nil
+        selectedShapePlacement = nil
+        selectedGroupPlacement = nil
+    }
+
+    private func removeFromSelection(_ ref: StagePlacementRef) {
+        additionalSelectedPlacements.remove(ref)
+        if primaryRef == ref { clearPrimarySelection() }
+    }
+
+    /// Bundles every currently selected object (2+; Flash requires at
+    /// least two to Group) into one new `PlacedGroup` — see its own doc
+    /// comment for why this is a genuinely separate concept from a
+    /// Symbol. Each selected object is necessarily on a different layer
+    /// (only one placement per layer is ever visible/selectable at a
+    /// given frame), so the group lands on whichever contributing layer
+    /// sits topmost in the Timeline list; every other contributing
+    /// layer's content at that frame is cleared. A group nested inside
+    /// the selection (grouping an already-selected group) is skipped —
+    /// nested groups aren't supported in v1.
+    func groupSelection() {
+        struct Resolved {
+            let layerIndex: Int
+            let keyframe: Int
+            var text: PlacedText?
+            var shape: PlacedShape?
+            var symbol: SymbolInstance?
+            var x: CGFloat { text?.x ?? shape?.x ?? symbol?.x ?? 0 }
+            var y: CGFloat { text?.y ?? shape?.y ?? symbol?.y ?? 0 }
+            var width: CGFloat { text?.width ?? shape?.width ?? symbol?.width ?? 0 }
+            var height: CGFloat { text?.height ?? shape?.height ?? symbol?.height ?? 0 }
+        }
+
+        var resolved: [Resolved] = []
+        for ref in selectedPlacements {
+            switch ref {
+            case .text(let r):
+                guard let idx = layers.firstIndex(where: { $0.id == r.layerID }), let content = layers[idx].textFrames[r.keyframe] else { continue }
+                resolved.append(Resolved(layerIndex: idx, keyframe: r.keyframe, text: content, shape: nil, symbol: nil))
+            case .shape(let r):
+                guard let idx = layers.firstIndex(where: { $0.id == r.layerID }), let content = layers[idx].shapeFrames[r.keyframe] else { continue }
+                resolved.append(Resolved(layerIndex: idx, keyframe: r.keyframe, text: nil, shape: content, symbol: nil))
+            case .symbol(let r):
+                guard let idx = layers.firstIndex(where: { $0.id == r.layerID }), let content = layers[idx].symbolFrames[r.keyframe] else { continue }
+                resolved.append(Resolved(layerIndex: idx, keyframe: r.keyframe, text: nil, shape: nil, symbol: content))
+            case .group:
+                continue
+            }
+        }
+        guard resolved.count >= 2 else { return }
+
+        let landing = resolved.min(by: { $0.layerIndex < $1.layerIndex })!
+        let landingLayer = layers[landing.layerIndex]
+        let landingKeyframe = landing.keyframe
+
+        let minX = resolved.map(\.x).min()!
+        let minY = resolved.map(\.y).min()!
+        let maxX = resolved.map { $0.x + $0.width }.max()!
+        let maxY = resolved.map { $0.y + $0.height }.max()!
+
+        withUndoSnapshot {
+            var texts: [PlacedText] = []
+            var shapes: [PlacedShape] = []
+            var symbols: [SymbolInstance] = []
+            for item in resolved {
+                let contributingLayer = layers[item.layerIndex]
+                if var t = item.text {
+                    t.x -= minX; t.y -= minY
+                    texts.append(t)
+                    contributingLayer.textFrames[item.keyframe] = nil
+                } else if var s = item.shape {
+                    s.x -= minX; s.y -= minY
+                    shapes.append(s)
+                    contributingLayer.shapeFrames[item.keyframe] = nil
+                } else if var sym = item.symbol {
+                    sym.x -= minX; sym.y -= minY
+                    symbols.append(sym)
+                    contributingLayer.symbolFrames[item.keyframe] = nil
+                }
+            }
+            let group = PlacedGroup(x: minX, y: minY, width: maxX - minX, height: maxY - minY, texts: texts, shapes: shapes, symbols: symbols)
+            landingLayer.groupFrames[landingKeyframe] = group
+            additionalSelectedPlacements.removeAll()
+            setPrimarySelection(.group(GroupPlacementRef(layerID: landingLayer.id, keyframe: landingKeyframe)))
+        }
+    }
+
+    /// Dissolves the selected `PlacedGroup` back into its constituent
+    /// objects, each restored at its absolute Stage position — the
+    /// reverse of `groupSelection`. The first child reuses the group's own
+    /// (layer, keyframe) slot; every additional child gets a brand-new
+    /// layer at that same frame, since a single (layer, keyframe) slot
+    /// can only ever hold one content item. Every restored object's
+    /// *original* layer isn't preserved — a reasonable v1 simplification,
+    /// since nothing records "which layer each child used to be on" once
+    /// they're bundled into the group.
+    func ungroupSelection() {
+        guard let ref = selectedGroupPlacement,
+              let layerIndex = layers.firstIndex(where: { $0.id == ref.layerID }),
+              let group = layers[layerIndex].groupFrames[ref.keyframe] else { return }
+
+        withUndoSnapshot {
+            let landingLayer = layers[layerIndex]
+            landingLayer.groupFrames[ref.keyframe] = nil
+
+            var members: [(PlacedText?, PlacedShape?, SymbolInstance?)] = []
+            for t in group.texts { members.append((t, nil, nil)) }
+            for s in group.shapes { members.append((nil, s, nil)) }
+            for sym in group.symbols { members.append((nil, nil, sym)) }
+
+            var newRefs: [StagePlacementRef] = []
+            for (index, member) in members.enumerated() {
+                let targetLayer: TLLayer
+                if index == 0 {
+                    targetLayer = landingLayer
+                } else {
+                    var frames = Array(repeating: FrameMark.empty, count: totalFrames)
+                    frames[ref.keyframe - 1] = .keyframe(hasScript: false)
+                    targetLayer = TLLayer(name: "\(landingLayer.name) \(index + 1)", swatch: landingLayer.swatch, frames: frames)
+                    layers.insert(targetLayer, at: layerIndex + index)
+                }
+                if var t = member.0 {
+                    t.x += group.x; t.y += group.y
+                    targetLayer.textFrames[ref.keyframe] = t
+                    newRefs.append(.text(TextPlacementRef(layerID: targetLayer.id, keyframe: ref.keyframe)))
+                } else if var s = member.1 {
+                    s.x += group.x; s.y += group.y
+                    targetLayer.shapeFrames[ref.keyframe] = s
+                    newRefs.append(.shape(ShapePlacementRef(layerID: targetLayer.id, keyframe: ref.keyframe)))
+                } else if var sym = member.2 {
+                    sym.x += group.x; sym.y += group.y
+                    targetLayer.symbolFrames[ref.keyframe] = sym
+                    newRefs.append(.symbol(SymbolPlacementRef(layerID: targetLayer.id, keyframe: ref.keyframe)))
+                }
+            }
+
+            clearPrimarySelection()
+            additionalSelectedPlacements = Set(newRefs)
+            if let first = newRefs.first { setPrimarySelection(first) }
+        }
+    }
 
     /// Drops a new shape at `rect` (Stage pixel coordinates, already
     /// normalized to a positive width/height — see StageView's drag-to-draw
@@ -708,9 +1112,11 @@ final class TimelineDocument {
             layer.shapeFrames[kf] = shape
             layer.textFrames[kf] = nil
             layer.symbolFrames[kf] = nil
+            layer.groupFrames[kf] = nil
             selectedShapePlacement = ShapePlacementRef(layerID: layer.id, keyframe: kf)
             selectedPlacement = nil
             selectedSymbolPlacement = nil
+            selectedGroupPlacement = nil
         }
     }
 
@@ -729,6 +1135,17 @@ final class TimelineDocument {
             get: { layer.shapeFrames[ref.keyframe] ?? PlacedShape(x: 0, y: 0) },
             set: { newValue in
                 self.withUndoSnapshot(coalesce: ref.undoToken) { layer.shapeFrames[ref.keyframe] = newValue }
+            }
+        )
+    }
+
+    /// Same idiom as `binding(for: ShapePlacementRef)`.
+    func binding(for ref: GroupPlacementRef) -> Binding<PlacedGroup>? {
+        guard let layer = layers.first(where: { $0.id == ref.layerID }) else { return nil }
+        return Binding(
+            get: { layer.groupFrames[ref.keyframe] ?? PlacedGroup(x: 0, y: 0, width: 1, height: 1) },
+            set: { newValue in
+                self.withUndoSnapshot(coalesce: ref.undoToken) { layer.groupFrames[ref.keyframe] = newValue }
             }
         )
     }
@@ -763,9 +1180,11 @@ final class TimelineDocument {
             layer.shapeFrames[kf] = copied
             layer.textFrames[kf] = nil
             layer.symbolFrames[kf] = nil
+            layer.groupFrames[kf] = nil
             selectedShapePlacement = ShapePlacementRef(layerID: layer.id, keyframe: kf)
             selectedPlacement = nil
             selectedSymbolPlacement = nil
+            selectedGroupPlacement = nil
         }
     }
 
@@ -821,9 +1240,11 @@ final class TimelineDocument {
         selectedFrame = 1
         hasSelectedFrame = false
         rangeSelectionEnd = nil
+        additionalSelectedPlacements.removeAll()
         selectedPlacement = nil
         selectedSymbolPlacement = nil
         selectedShapePlacement = nil
+        selectedGroupPlacement = nil
     }
 
     /// The breadcrumb trail's labels, outermost to innermost — "Scene 1"
@@ -908,9 +1329,11 @@ final class TimelineDocument {
             layer.textFrames[kf] = placement
             layer.symbolFrames[kf] = nil
             layer.shapeFrames[kf] = nil
+            layer.groupFrames[kf] = nil
             selectedPlacement = TextPlacementRef(layerID: layer.id, keyframe: kf)
             selectedSymbolPlacement = nil
             selectedShapePlacement = nil
+            selectedGroupPlacement = nil
         }
     }
 
@@ -1010,9 +1433,11 @@ final class TimelineDocument {
             layer.textFrames[kf] = copied
             layer.symbolFrames[kf] = nil
             layer.shapeFrames[kf] = nil
+            layer.groupFrames[kf] = nil
             selectedPlacement = TextPlacementRef(layerID: layer.id, keyframe: kf)
             selectedSymbolPlacement = nil
             selectedShapePlacement = nil
+            selectedGroupPlacement = nil
         }
     }
 
@@ -1030,6 +1455,7 @@ final class TimelineDocument {
         let textFrames: [Int: PlacedText]
         let symbolFrames: [Int: SymbolInstance]
         let shapeFrames: [Int: PlacedShape]
+        let groupFrames: [Int: PlacedGroup]
         let tweenSettings: [Int: TweenSettings]
         let colorTweenSettings: [Int: TweenSettings]
         let labels: [Int: String]
@@ -1047,6 +1473,7 @@ final class TimelineDocument {
         var textFrames: [Int: PlacedText] = [:]
         var symbolFrames: [Int: SymbolInstance] = [:]
         var shapeFrames: [Int: PlacedShape] = [:]
+        var groupFrames: [Int: PlacedGroup] = [:]
         var tweenSettings: [Int: TweenSettings] = [:]
         var colorTweenSettings: [Int: TweenSettings] = [:]
         var labels: [Int: String] = [:]
@@ -1056,13 +1483,14 @@ final class TimelineDocument {
             if let v = layer.textFrames[frame] { textFrames[offset] = v }
             if let v = layer.symbolFrames[frame] { symbolFrames[offset] = v }
             if let v = layer.shapeFrames[frame] { shapeFrames[offset] = v }
+            if let v = layer.groupFrames[frame] { groupFrames[offset] = v }
             if let v = layer.tweenSettings[frame] { tweenSettings[offset] = v }
             if let v = layer.colorTweenSettings[frame] { colorTweenSettings[offset] = v }
             if let v = layer.frameLabels[frame] { labels[offset] = v }
         }
         copiedFrames = CopiedFrames(
             marks: marks, scripts: scripts, textFrames: textFrames, symbolFrames: symbolFrames, shapeFrames: shapeFrames,
-            tweenSettings: tweenSettings, colorTweenSettings: colorTweenSettings, labels: labels
+            groupFrames: groupFrames, tweenSettings: tweenSettings, colorTweenSettings: colorTweenSettings, labels: labels
         )
     }
 
@@ -1081,6 +1509,7 @@ final class TimelineDocument {
             for (offset, v) in copied.textFrames { layer.textFrames[startFrame + offset] = v }
             for (offset, v) in copied.symbolFrames { layer.symbolFrames[startFrame + offset] = v }
             for (offset, v) in copied.shapeFrames { layer.shapeFrames[startFrame + offset] = v }
+            for (offset, v) in copied.groupFrames { layer.groupFrames[startFrame + offset] = v }
             for (offset, v) in copied.tweenSettings { layer.tweenSettings[startFrame + offset] = v }
             for (offset, v) in copied.colorTweenSettings { layer.colorTweenSettings[startFrame + offset] = v }
             for (offset, v) in copied.labels { layer.frameLabels[startFrame + offset] = v }
@@ -1098,7 +1527,11 @@ final class TimelineDocument {
     func createTween(layer: TLLayer, from startFrame: Int, to endFrame: Int) {
         guard startFrame != endFrame else { return }
         let lo = min(startFrame, endFrame), hi = max(startFrame, endFrame)
-        guard layer.isKeyframe(at: lo), layer.textFrames[lo] != nil || layer.symbolFrames[lo] != nil else {
+        // Groups aren't tweenable in v1 (see `PlacedGroup`'s own doc
+        // comment) — same as shapes weren't at first, a group-only
+        // keyframe deliberately can't start Create Tween.
+        guard layer.isKeyframe(at: lo),
+              layer.textFrames[lo] != nil || layer.symbolFrames[lo] != nil || layer.shapeFrames[lo] != nil else {
             logToConsole("Create Tween needs a keyframe with content at the start of the range.", level: .warn)
             return
         }
@@ -1106,9 +1539,10 @@ final class TimelineDocument {
             if !layer.isKeyframe(at: hi) {
                 insertKeyframe(layer: layer, at: hi, blank: false)
             }
-            if layer.textFrames[hi] == nil && layer.symbolFrames[hi] == nil {
+            if layer.textFrames[hi] == nil && layer.symbolFrames[hi] == nil && layer.shapeFrames[hi] == nil && layer.groupFrames[hi] == nil {
                 layer.textFrames[hi] = layer.textFrames[lo]
                 layer.symbolFrames[hi] = layer.symbolFrames[lo]
+                layer.shapeFrames[hi] = layer.shapeFrames[lo]
             }
             growCapacity(to: max(totalFrames, hi))
             for f in (lo + 1)..<hi {
@@ -1148,10 +1582,12 @@ final class TimelineDocument {
             let movedText = layer.textFrames[oldEnd]
             let movedSymbol = layer.symbolFrames[oldEnd]
             let movedShape = layer.shapeFrames[oldEnd]
+            let movedGroup = layer.groupFrames[oldEnd]
             let movedScript = layer.frameScripts[oldEnd]
             layer.textFrames[oldEnd] = nil
             layer.symbolFrames[oldEnd] = nil
             layer.shapeFrames[oldEnd] = nil
+            layer.groupFrames[oldEnd] = nil
             layer.frameScripts[oldEnd] = nil
 
             if newEnd > oldEnd {
@@ -1162,6 +1598,7 @@ final class TimelineDocument {
             layer.textFrames[newEnd] = movedText
             layer.symbolFrames[newEnd] = movedSymbol
             layer.shapeFrames[newEnd] = movedShape
+            layer.groupFrames[newEnd] = movedGroup
             layer.frameScripts[newEnd] = movedScript
             layer.frames[newEnd - 1] = .keyframe(hasScript: !(movedScript ?? "").isEmpty)
 
@@ -1202,6 +1639,7 @@ final class TimelineDocument {
             let text = layer.textFrames[from]
             let symbol = layer.symbolFrames[from]
             let shape = layer.shapeFrames[from]
+            let group = layer.groupFrames[from]
             let label = layer.frameLabels[from]
 
             layer.frames[from - 1] = .empty
@@ -1209,6 +1647,7 @@ final class TimelineDocument {
             layer.textFrames[from] = nil
             layer.symbolFrames[from] = nil
             layer.shapeFrames[from] = nil
+            layer.groupFrames[from] = nil
             layer.frameLabels[from] = nil
             // Any `.plain` continuation this keyframe was governing is now
             // ungoverned (nothing behind it to continue from) — clear it
@@ -1224,6 +1663,7 @@ final class TimelineDocument {
             layer.textFrames[to] = text
             layer.symbolFrames[to] = symbol
             layer.shapeFrames[to] = shape
+            layer.groupFrames[to] = group
             layer.frameLabels[to] = label
 
             if selectedFrame == from { selectedFrame = to }
@@ -1839,6 +2279,55 @@ final class TimelineDocument {
 
     var selectedLayer: TLLayer? { layers.first { $0.id == selectedLayerID } }
 
+    // MARK: - Masking
+    //
+    // Flash's mask layers: a `.mask`-kind layer's own content is never
+    // drawn directly on Stage — it's only used as a clip stencil for the
+    // contiguous run of `masked` layers directly below it in the Timeline
+    // list, the same grouping Flash's own layer panel shows via
+    // indentation. A non-masked layer breaks the run; a later `.mask`
+    // layer starts a new one.
+
+    /// Turns `layer` into a mask layer, or back into a normal one — a
+    /// layer already carrying `masked = true` can't itself become a mask
+    /// (a mask can't be masked), same as Flash's own rule.
+    func toggleLayerMask(_ layer: TLLayer) {
+        guard !layer.masked else { return }
+        withUndoSnapshot {
+            layer.kind = layer.kind == .mask ? .normal : .mask
+        }
+    }
+
+    /// Marks/unmarks `layer` as clipped by the mask above it. Meaningless
+    /// (and left alone) on a mask layer itself.
+    func toggleLayerMasked(_ layer: TLLayer) {
+        guard layer.kind != .mask else { return }
+        withUndoSnapshot {
+            layer.masked.toggle()
+        }
+    }
+
+    /// The mask layer currently clipping `target`, walking `layers` in
+    /// their real Timeline order (not Stage stacking order, which is a
+    /// separate concern `StageContentView`'s own render loop already
+    /// handles) — `nil` for a mask layer itself, for `masked == false`, or
+    /// once a non-masked layer has broken the run back to the nearest
+    /// mask above.
+    func maskingLayer(for target: TLLayer) -> TLLayer? {
+        var activeMask: TLLayer?
+        for layer in layers {
+            if layer.kind == .mask {
+                activeMask = layer
+            } else if !layer.masked {
+                activeMask = nil
+            }
+            if layer.id == target.id {
+                return layer.kind == .mask ? nil : activeMask
+            }
+        }
+        return nil
+    }
+
     // MARK: - Frame editing
 
     /// Grows every layer's addressable frame capacity, padding with `.empty`.
@@ -1904,6 +2393,12 @@ final class TimelineDocument {
                 if layer.symbolFrames[frame] == nil, let snapshot = layer.interpolatedSymbolInstance(at: frame) {
                     layer.symbolFrames[frame] = snapshot
                 }
+                if layer.shapeFrames[frame] == nil, let snapshot = layer.interpolatedPlacedShape(at: frame) {
+                    layer.shapeFrames[frame] = snapshot
+                }
+                if layer.groupFrames[frame] == nil, let snapshot = layer.interpolatedPlacedGroup(at: frame) {
+                    layer.groupFrames[frame] = snapshot
+                }
             }
             layer.frames[idx] = blank ? .emptyKeyframe : .keyframe(hasScript: !(layer.frameScripts[frame] ?? "").isEmpty)
         }
@@ -1932,6 +2427,7 @@ final class TimelineDocument {
             layer.textFrames[frame] = nil
             layer.symbolFrames[frame] = nil
             layer.shapeFrames[frame] = nil
+            layer.groupFrames[frame] = nil
             layer.tweenSettings[frame] = nil
             layer.colorTweenSettings[frame] = nil
             layer.frameLabels[frame] = nil

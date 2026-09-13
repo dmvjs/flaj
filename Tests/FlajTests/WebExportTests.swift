@@ -970,4 +970,139 @@ final class WebExportTests: XCTestCase {
         XCTAssertEqual(ellipse[2], "4px")
         XCTAssertNotEqual(ellipse[3], "0px")
     }
+
+    /// Proves `shapeBorderRadius`/`el.style.borderStyle` in player.js
+    /// actually carry a rectangle's `cornerRadius`/`strokeStyle` into the
+    /// exported page's CSS, not just the native Stage.
+    func testRoundedDashedShapeCarriesCornerRadiusAndStrokeStyleIntoTheExportedPage() async throws {
+        let doc = DocumentFixtures.roundedDashedShape()
+        let url = exportedURL(doc)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let harness = WebViewHarness()
+        try await harness.load(fileURL: url)
+
+        let style = try await harness.evaluate("""
+        (() => {
+          const s = getComputedStyle(document.querySelector('.flaj-shape'));
+          return [s.borderRadius, s.borderStyle];
+        })()
+        """)
+        let values = try XCTUnwrap(style as? [String])
+        XCTAssertEqual(values[0], "12px")
+        XCTAssertEqual(values[1], "dashed")
+    }
+
+    /// A tweened shape span (DocumentFixtures.tweenedShape) reaches both
+    /// its position/size endpoint and its independently-eased fill/stroke
+    /// color+opacity endpoint — mirrors testTweenedTextReachesBothEndpoints,
+    /// proving player.js's createShapeVisual builds real, correct start/end
+    /// Web Animation keyframes for shapes, not just for text.
+    func testTweenedShapeReachesBothEndpoints() async throws {
+        let doc = DocumentFixtures.tweenedShape()
+        let url = exportedURL(doc)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let harness = WebViewHarness()
+        try await harness.load(fileURL: url)
+
+        try await harness.evaluate("gotoAndStop(1)")
+        let start = try await harness.evaluate("""
+        (() => {
+          const s = getComputedStyle(document.querySelector('.flaj-shape'));
+          return [s.left, s.borderTopWidth, s.backgroundColor, s.opacity];
+        })()
+        """)
+        let startValues = try XCTUnwrap(start as? [String])
+        XCTAssertEqual(startValues[0], "4px")
+        XCTAssertEqual(startValues[1], "0px")
+        XCTAssertEqual(startValues[2], "rgba(0, 0, 0, 0)")
+        XCTAssertEqual(startValues[3], "0")
+
+        try await harness.evaluate("gotoAndStop(10)")
+        let end = try await harness.evaluate("""
+        (() => {
+          const s = getComputedStyle(document.querySelector('.flaj-shape'));
+          return [s.left, s.borderTopWidth, s.backgroundColor, s.opacity];
+        })()
+        """)
+        let endValues = try XCTUnwrap(end as? [String])
+        XCTAssertEqual(endValues[0], "40px")
+        XCTAssertEqual(endValues[1], "10px")
+        XCTAssertEqual(endValues[2], "rgb(255, 255, 255)")
+        XCTAssertEqual(endValues[3], "1")
+    }
+
+    /// Same proof `testTweenSpanIsARealWebAnimation` gives for text, for a
+    /// tweened shape span instead — a real, browser-native Web Animation,
+    /// not a per-tick JS-recomputed style.
+    func testTweenedShapeSpanIsARealWebAnimation() async throws {
+        let doc = DocumentFixtures.tweenedShape()
+        let url = exportedURL(doc)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let harness = WebViewHarness()
+        try await harness.load(fileURL: url)
+        try await harness.evaluate("gotoAndStop(5)")
+
+        let animationCount = try await harness.evaluate("document.getAnimations().length") as? NSNumber
+        XCTAssertGreaterThan(animationCount?.intValue ?? 0, 0)
+    }
+
+    /// Proves player.js's clip-path masking (maskAwareParent/clipPathFor/
+    /// syncMaskWraps) actually wires up in a real page: the masked
+    /// content's `.flaj-shape` div lives inside a `.flaj-mask-wrap` with a
+    /// real (non-`none`) clip-path, and the mask layer's own shape is
+    /// never itself rendered as a second, independently visible
+    /// `.flaj-shape` — mirrors the native-side proof in
+    /// MaskTests/GIFExportTests, for the web export path instead.
+    func testMaskedShapeGetsClipPathAppliedInTheExportedPage() async throws {
+        let doc = DocumentFixtures.maskedShape()
+        let url = exportedURL(doc)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let harness = WebViewHarness()
+        try await harness.load(fileURL: url)
+
+        let shapeCount = try await harness.evaluate("document.querySelectorAll('.flaj-shape').length")
+        XCTAssertEqual(shapeCount as? Int, 1, "the mask layer's own shape should never render as a second, independently visible .flaj-shape")
+
+        let wrapExists = try await harness.evaluate("document.querySelector('.flaj-mask-wrap .flaj-shape') !== null")
+        XCTAssertEqual(wrapExists as? Bool, true, "the masked content's shape should live inside the mask wrapper")
+
+        let clipPath = try await harness.evaluate("getComputedStyle(document.querySelector('.flaj-mask-wrap')).clipPath")
+        XCTAssertNotEqual(clipPath as? String, "none")
+    }
+
+    /// Proves player.js's group rendering (createGroupVisual) actually
+    /// wires up in a real page: both bundled shapes render as `.flaj-shape`
+    /// children inside one `.flaj-group` wrapper, each at its own
+    /// group-relative position.
+    func testGroupRendersBothChildrenAtTheirRelativePositionsInTheExportedPage() async throws {
+        let doc = DocumentFixtures.groupedShapes()
+        let url = exportedURL(doc)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let harness = WebViewHarness()
+        try await harness.load(fileURL: url)
+
+        let groupCount = try await harness.evaluate("document.querySelectorAll('.flaj-group').length")
+        XCTAssertEqual(groupCount as? Int, 1)
+
+        let childCount = try await harness.evaluate("document.querySelectorAll('.flaj-group .flaj-shape').length")
+        XCTAssertEqual(childCount as? Int, 2, "both bundled shapes should render inside the group wrapper")
+
+        let positions = try await harness.evaluate("""
+        (() => {
+          const wrap = getComputedStyle(document.querySelector('.flaj-group'));
+          const children = Array.from(document.querySelectorAll('.flaj-group .flaj-shape'))
+            .map(el => getComputedStyle(el).left);
+          return [wrap.left, wrap.top, ...children];
+        })()
+        """)
+        let values = try XCTUnwrap(positions as? [String])
+        XCTAssertEqual(values[0], "5px") // group.x
+        XCTAssertEqual(values[1], "5px") // group.y
+        XCTAssertEqual(Set(values[2...]), ["0px", "10px"], "each child's left should be relative to the group's own origin")
+    }
 }

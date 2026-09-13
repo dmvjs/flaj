@@ -1,6 +1,6 @@
 # Flaj
 
-A Flash successor for people who'd rather write JS/TS than ActionScript. Stage, timeline, layers, keyframes, classic motion tweens, reusable symbols, vector shapes, rulers and guides — frame code that's just JavaScript.
+A Flash successor for people who'd rather write JS/TS than ActionScript. Stage, timeline, layers, keyframes, classic motion tweens, reusable symbols, vector shapes, grouping, rulers and guides — frame code that's just JavaScript.
 
 ## Running
 
@@ -34,7 +34,7 @@ Full reference and execution model: [`docs/SCRIPTING.md`](docs/SCRIPTING.md). Ty
 
 F5 insert frame · F6 keyframe · F7 blank keyframe · Shift-F5 remove frames — same as Flash.
 
-⌘Z / ⇧⌘Z undo/redo · ⌘O open · ⌘S save · ⇧⌘S save as · ⌘Return preview (opens a window sized to the Stage's exact pixel dimensions, like Flash's Test Movie). Delete/⌘X/⌘C/⌘V work on the current Stage selection; arrow keys nudge it 1pt (10pt with Shift).
+⌘Z / ⇧⌘Z undo/redo · ⌘O open · ⌘S save · ⇧⌘S save as · ⌘Return preview (opens a window sized to the Stage's exact pixel dimensions, like Flash's Test Movie). Delete/⌘X/⌘C/⌘V work on the current Stage selection; arrow keys nudge it 1pt (10pt with Shift). ⌘G group · ⇧⌘G ungroup (see "Multi-select & grouping" below).
 
 ⌥⇧⌘R toggle rulers · ⌘; toggle guide visibility — both under the View menu (see "Rulers & guides" below).
 
@@ -46,15 +46,31 @@ File → Export GIF… simulates the whole timeline frame by frame and writes it
 
 ## Format
 
-`.flaj` files are plain JSON — layers, frame marks, scripts, placed text, placed shapes, tween settings, frame labels, ruler guides, a Library of reusable symbols (each with its own nested layers/timeline, the same shape the document's own Timeline has). Older files missing newer fields still open, including files saved before a symbol's content was a Timeline at all.
+`.flaj` files are plain JSON — layers (including mask/masked state), frame marks, scripts, placed text, placed shapes, placed groups, tween settings, frame labels, ruler guides, a Library of reusable symbols (each with its own nested layers/timeline, the same shape the document's own Timeline has). Older files missing newer fields still open, including files saved before a symbol's content was a Timeline at all.
 
 ## Shapes
 
-The Rectangle/Ellipse tools (Tools panel, or the toolbar) draw a shape by click-dragging across the Stage — hold Shift to constrain to a square/circle — with a live preview as you drag, rather than Flash's click-to-place-then-resize. A drawn shape is its own independent, always-selectable object (not Flash's classic shape-merge drawing model): Properties panel gives it fill color+opacity, stroke color+opacity+width, and position/size, with a resize handle on every corner. Shapes aren't tweenable yet — they render the same way in the live Stage, GIF export, and web export.
+The Rectangle/Ellipse tools (Tools panel, or the toolbar) draw a shape by click-dragging across the Stage — hold Shift to constrain to a square/circle — with a live preview as you drag, rather than Flash's click-to-place-then-resize. A drawn shape is its own independent, always-selectable object (not Flash's classic shape-merge drawing model): Properties panel gives it fill color+opacity, stroke color+opacity+width, stroke style (solid/dashed/dotted), a corner radius for rectangles, and position/size, with a resize handle on every corner. Shapes are tweenable exactly like text/symbols (Insert → Create Tween) — position/size/stroke width/corner radius ease on one curve, fill/stroke color and every opacity ease independently on their own, while stroke style holds at the start keyframe's value across the span — across the live Stage, GIF export, and web export alike.
+
+## Multi-select & grouping
+
+Shift-click or Cmd-click adds another Stage object to the current selection; dragging any one selected object moves all of them together. Right-click (or ⌘G) on a multi-selection of 2+ objects → Group bundles them into a Group — a lightweight, non-reusable container distinct from a Symbol (a Group has no Library entry and no independent Timeline of its own; a Symbol does). A Group moves and resizes as one unit — resizing proportionally rescales every bundled child. Right-click a Group → Ungroup (or ⇧⌘G) dissolves it back into independent objects at their original positions; there's no double-click-to-edit-one-member mode yet, so editing a single member means Ungroup, edit, then re-group. Groups can bundle text, shapes, and symbol instances (a nested symbol keeps looping independently); they aren't tweenable yet. Web export renders every bundled child; a nested symbol's own loop is captured once at export-render time rather than kept continuously current the way it is natively.
+
+## Masking
+
+Right-click a layer → Mask turns it into a mask layer (never itself drawn on Stage, only used as a clip stencil); right-click the layer(s) directly below it → Masked clips them to whatever the mask layer's own content covers at each frame. Any content kind — text, a shape, or a symbol instance — can be the mask source on the live Stage and in GIF export; web export currently only supports a shape (rectangle/ellipse) as the mask source, via CSS `clip-path` — a text- or symbol-sourced mask still renders correctly in the app and in exported GIFs, just unclipped in the exported web page for now. A mask can't itself be masked, and a masked layer can't itself become a mask.
 
 ## Rulers & guides
 
 ⌥⇧⌘R (View menu) toggles pixel-only rulers along the Stage's top/left edges, with tick spacing that adapts to the current fit-to-panel scale so labels never crowd together. Drag out from either ruler to drop a guide — a horizontal or vertical layout line that snaps to nothing yet but stays exactly where you put it, draggable afterward, and removed by dragging it back off the Stage. ⌘; (View menu) hides/shows guides without deleting them; guides themselves are saved with the document.
+
+## Onion skinning
+
+The square-stack icon in the Timeline toggles onion skinning — ghosted, flat-tinted (blue before the playhead, orange after) previews of nearby frames' content layered behind the current frame, with a ±1–5 frame range adjuster next to the toggle. Covers every content kind (placed text, symbol instances, and shapes) and every tween in progress. Editor-only: it never appears in GIF or web export output.
+
+## Color pickers
+
+Every color swatch in the app (Stage color, fill/stroke, text color, filter colors, web export page background) opens a small popover anchored right next to the swatch, not the system's separate floating color panel — click, pick, done, without a window appearing somewhere else on screen. Opacity is always its own slider alongside the swatch rather than folded into the color itself.
 
 ## Symbols
 

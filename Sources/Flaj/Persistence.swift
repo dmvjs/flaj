@@ -80,10 +80,10 @@ extension FlajLayerFile {
     init(_ layer: TLLayer) {
         self.init(
             id: layer.id, name: layer.name, swatchHex: layer.swatch.hexString, kind: layer.kind,
-            indent: layer.indent, locked: layer.locked, hidden: layer.hidden,
+            indent: layer.indent, locked: layer.locked, hidden: layer.hidden, masked: layer.masked,
             expanded: layer.expanded, frames: layer.frames, frameScripts: layer.frameScripts,
             textFrames: layer.textFrames, symbolFrames: layer.symbolFrames, shapeFrames: layer.shapeFrames,
-            tweenSettings: layer.tweenSettings,
+            groupFrames: layer.groupFrames, tweenSettings: layer.tweenSettings,
             colorTweenSettings: layer.colorTweenSettings, frameLabels: layer.frameLabels
         )
     }
@@ -95,11 +95,13 @@ extension TLLayer {
             id: file.id, name: file.name, swatch: Color(hex: file.swatchHex), kind: file.kind, indent: file.indent,
             locked: file.locked, hidden: file.hidden, frames: file.frames
         )
+        masked = file.masked
         expanded = file.expanded
         frameScripts = file.frameScripts
         textFrames = file.textFrames
         symbolFrames = file.symbolFrames
         shapeFrames = file.shapeFrames
+        groupFrames = file.groupFrames
         tweenSettings = file.tweenSettings
         colorTweenSettings = file.colorTweenSettings
         frameLabels = file.frameLabels
@@ -196,25 +198,27 @@ struct FlajLayerFile: Codable {
     var indent: Int
     var locked: Bool
     var hidden: Bool
+    var masked: Bool
     var expanded: Bool
     var frames: [FrameMark]
     var frameScripts: [Int: String]
     var textFrames: [Int: PlacedText]
     var symbolFrames: [Int: SymbolInstance]
     var shapeFrames: [Int: PlacedShape]
+    var groupFrames: [Int: PlacedGroup]
     var tweenSettings: [Int: TweenSettings]
     var colorTweenSettings: [Int: TweenSettings]
     var frameLabels: [Int: String]
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, swatchHex, kind, indent, locked, hidden, expanded, frames, frameScripts, textFrames,
-             symbolFrames, shapeFrames, tweenSettings, colorTweenSettings, frameLabels
+        case id, name, swatchHex, kind, indent, locked, hidden, masked, expanded, frames, frameScripts, textFrames,
+             symbolFrames, shapeFrames, groupFrames, tweenSettings, colorTweenSettings, frameLabels
     }
 
     init(id: UUID = UUID(), name: String, swatchHex: String, kind: LayerKind, indent: Int, locked: Bool, hidden: Bool,
-         expanded: Bool, frames: [FrameMark], frameScripts: [Int: String], textFrames: [Int: PlacedText],
-         symbolFrames: [Int: SymbolInstance] = [:], shapeFrames: [Int: PlacedShape] = [:], tweenSettings: [Int: TweenSettings],
-         colorTweenSettings: [Int: TweenSettings], frameLabels: [Int: String] = [:]) {
+         masked: Bool = false, expanded: Bool, frames: [FrameMark], frameScripts: [Int: String], textFrames: [Int: PlacedText],
+         symbolFrames: [Int: SymbolInstance] = [:], shapeFrames: [Int: PlacedShape] = [:], groupFrames: [Int: PlacedGroup] = [:],
+         tweenSettings: [Int: TweenSettings], colorTweenSettings: [Int: TweenSettings], frameLabels: [Int: String] = [:]) {
         self.id = id
         self.name = name
         self.swatchHex = swatchHex
@@ -222,19 +226,21 @@ struct FlajLayerFile: Codable {
         self.indent = indent
         self.locked = locked
         self.hidden = hidden
+        self.masked = masked
         self.expanded = expanded
         self.frames = frames
         self.frameScripts = frameScripts
         self.textFrames = textFrames
         self.symbolFrames = symbolFrames
         self.shapeFrames = shapeFrames
+        self.groupFrames = groupFrames
         self.tweenSettings = tweenSettings
         self.colorTweenSettings = colorTweenSettings
         self.frameLabels = frameLabels
     }
 
     // Custom decode so .flaj files saved before id/textFrames/symbolFrames/
-    // shapeFrames/tweenSettings/colorTweenSettings/frameLabels existed still open.
+    // shapeFrames/groupFrames/tweenSettings/colorTweenSettings/masked existed still open.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
@@ -244,12 +250,14 @@ struct FlajLayerFile: Codable {
         indent = try c.decode(Int.self, forKey: .indent)
         locked = try c.decode(Bool.self, forKey: .locked)
         hidden = try c.decode(Bool.self, forKey: .hidden)
+        masked = try c.decodeIfPresent(Bool.self, forKey: .masked) ?? false
         expanded = try c.decode(Bool.self, forKey: .expanded)
         frames = try c.decode([FrameMark].self, forKey: .frames)
         frameScripts = try c.decode([Int: String].self, forKey: .frameScripts)
         textFrames = try c.decodeIfPresent([Int: PlacedText].self, forKey: .textFrames) ?? [:]
         symbolFrames = try c.decodeIfPresent([Int: SymbolInstance].self, forKey: .symbolFrames) ?? [:]
         shapeFrames = try c.decodeIfPresent([Int: PlacedShape].self, forKey: .shapeFrames) ?? [:]
+        groupFrames = try c.decodeIfPresent([Int: PlacedGroup].self, forKey: .groupFrames) ?? [:]
         tweenSettings = try c.decodeIfPresent([Int: TweenSettings].self, forKey: .tweenSettings) ?? [:]
         colorTweenSettings = try c.decodeIfPresent([Int: TweenSettings].self, forKey: .colorTweenSettings) ?? [:]
         frameLabels = try c.decodeIfPresent([Int: String].self, forKey: .frameLabels) ?? [:]

@@ -26,6 +26,35 @@ extension View {
     }
 }
 
+/// The type-erased Shape for a placed shape's `kind`, honoring a
+/// rectangle's own `cornerRadius` (an ellipse has no analogous property).
+/// Shared by every place a shape gets drawn — `StagePlacedShapeView`,
+/// `OnionSkinOverlay`, `MaskStencilView`, `StagePlacedGroupView` — so
+/// corner radius doesn't need reimplementing at each call site.
+func anyShapePath(for shape: PlacedShape, scale: CGFloat) -> AnyShape {
+    switch shape.kind {
+    case .ellipse: return AnyShape(Ellipse())
+    case .rectangle: return AnyShape(RoundedRectangle(cornerRadius: shape.cornerRadius * scale, style: .continuous))
+    }
+}
+
+/// The stroke `StrokeStyle` (SwiftUI's own type — see `StrokeDashStyle`'s
+/// own doc comment on why the model's enum has a different name) for a
+/// placed shape's stroke width and dash style. Dotted uses a near-zero
+/// dash length with a round cap, the standard SwiftUI/CSS trick for
+/// rendering round dots instead of dashes.
+func shapeStrokeStyle(for shape: PlacedShape, scale: CGFloat) -> StrokeStyle {
+    let width = shape.strokeWidth * scale
+    switch shape.strokeStyle {
+    case .solid:
+        return StrokeStyle(lineWidth: width)
+    case .dashed:
+        return StrokeStyle(lineWidth: width, dash: [width * 3, width * 2])
+    case .dotted:
+        return StrokeStyle(lineWidth: width, lineCap: .round, dash: [0.001, width * 2])
+    }
+}
+
 /// The Stage's actual content — background + text objects — at a given
 /// `scale` factor. Shared between the live preview (StageView, scaled to
 /// fit its panel) and GIF export (rendered 1:1 at the Stage's real pixel
@@ -63,20 +92,27 @@ struct StageContentView: View {
                 StageTextView(obj: obj, scale: scale)
             }
             ForEach(doc.visibleLayers.filter { !$0.hidden }) { layer in
-                if let kf = layer.governingKeyframe(at: doc.playhead) {
-                    if layer.textFrames[kf] != nil {
-                        StagePlacedTextView(doc: doc, layer: layer, keyframe: kf, scale: scale)
-                    } else if layer.shapeFrames[kf] != nil {
-                        StagePlacedShapeView(doc: doc, layer: layer, keyframe: kf, scale: scale)
-                    } else if let instance = layer.symbolFrames[kf],
-                              instance.name.isEmpty || doc.stageObject(id: instance.name) == nil {
-                        // A named instance that's already spawned into
-                        // doc.stageObjects (see TimelineDocument.
-                        // spawnNamedInstances) is rendered by the
-                        // StageTextView loop above instead — it's now a
-                        // live, script-controlled object, not
-                        // Timeline-authored content.
-                        StageSymbolInstanceView(doc: doc, layer: layer, keyframe: kf, scale: scale)
+                // A mask layer's own content is never drawn directly on
+                // Stage — only used as a clip stencil (see maskedContent/
+                // MaskStencilView) for whatever it masks.
+                if layer.kind != .mask, let kf = layer.governingKeyframe(at: doc.playhead) {
+                    maskedContent(for: layer) {
+                        if layer.textFrames[kf] != nil {
+                            StagePlacedTextView(doc: doc, layer: layer, keyframe: kf, scale: scale)
+                        } else if layer.shapeFrames[kf] != nil {
+                            StagePlacedShapeView(doc: doc, layer: layer, keyframe: kf, scale: scale)
+                        } else if layer.groupFrames[kf] != nil {
+                            StagePlacedGroupView(doc: doc, layer: layer, keyframe: kf, scale: scale)
+                        } else if let instance = layer.symbolFrames[kf],
+                                  instance.name.isEmpty || doc.stageObject(id: instance.name) == nil {
+                            // A named instance that's already spawned into
+                            // doc.stageObjects (see TimelineDocument.
+                            // spawnNamedInstances) is rendered by the
+                            // StageTextView loop above instead — it's now a
+                            // live, script-controlled object, not
+                            // Timeline-authored content.
+                            StageSymbolInstanceView(doc: doc, layer: layer, keyframe: kf, scale: scale)
+                        }
                     }
                 }
             }
@@ -111,9 +147,7 @@ struct StageContentView: View {
             // shape a real size) — a bare click with one of those tools
             // active just deselects, matching .selection's own behavior,
             // rather than doing nothing at all.
-            doc.selectedPlacement = nil
-            doc.selectedSymbolPlacement = nil
-            doc.selectedShapePlacement = nil
+            doc.clearAllSelection()
         }
     }
 
@@ -166,6 +200,81 @@ struct StageContentView: View {
         guard let url = URL(string: urlString) else { return }
         NSWorkspace.shared.open(url)
     }
+
+    /// Wraps `content` in `.mask { }` against `layer`'s masking layer (see
+    /// `TimelineDocument.maskingLayer(for:)`) when it has one, otherwise
+    /// passes it through untouched — the one place a masked layer's
+    /// rendering differs from a normal one, kept out of the three-way
+    /// text/shape/symbol branch above so that branch doesn't need to know
+    /// masking exists at all.
+    @ViewBuilder
+    private func maskedContent<Content: View>(for layer: TLLayer, @ViewBuilder content: () -> Content) -> some View {
+        if let maskLayer = doc.maskingLayer(for: layer) {
+            content().mask { MaskStencilView(doc: doc, maskLayer: maskLayer, scale: scale) }
+        } else {
+            content()
+        }
+    }
+}
+
+/// The alpha-channel stencil for `.mask()` — renders `maskLayer`'s content
+/// at the current playhead exactly like its normal on-Stage view would
+/// (same interpolation, same tween behavior), but with no selection
+/// outline, drag gesture, or context menu: a mask's own content is never
+/// directly interactive or independently visible on Stage, only used to
+/// reveal whatever it clips. SwiftUI's `.mask()` composites using the mask
+/// view's alpha channel, so color is irrelevant here — only opacity/
+/// coverage is, same reasoning `OnionSkinOverlay`'s flat-tinted ghosts use
+/// for a different purpose.
+private struct MaskStencilView: View {
+    let doc: TimelineDocument
+    let maskLayer: TLLayer
+    var scale: CGFloat
+
+    var body: some View {
+        Group {
+            if let text = maskLayer.interpolatedPlacedText(at: doc.playhead) {
+                Text(text.text)
+                    .font(.custom(text.fontName, size: text.fontSize * scale))
+                    .bold(text.bold)
+                    .italic(text.italic)
+                    .multilineTextAlignment(text.alignment.swiftUIAlignment)
+                    .frame(width: text.width * scale, height: text.height * scale, alignment: text.alignment.frameAlignment)
+                    .opacity(text.opacity)
+                    .scaleEffect(text.scale)
+                    .rotationEffect(.degrees(text.rotation))
+                    .position(x: (text.x + text.width / 2) * scale, y: (text.y + text.height / 2) * scale)
+            } else if let shape = maskLayer.interpolatedPlacedShape(at: doc.playhead) {
+                shapeStencil(shape)
+            } else if let kf = maskLayer.governingKeyframe(at: doc.playhead),
+                      let instance = maskLayer.interpolatedSymbolInstance(at: doc.playhead),
+                      let symbol = doc.library.first(where: { $0.id == instance.symbolID }),
+                      let content = symbol.content(atLocalFrame: symbol.localFrame(atParentFrame: doc.playhead, governingKeyframe: kf)) {
+                Text(content.text)
+                    .font(.custom(content.fontName, size: content.fontSize * scale))
+                    .bold(content.bold)
+                    .italic(content.italic)
+                    .frame(width: instance.width * scale, height: instance.height * scale, alignment: content.alignment.frameAlignment)
+                    .opacity(instance.opacity * content.opacity)
+                    .scaleEffect(instance.scale * content.scale)
+                    .rotationEffect(.degrees(instance.rotation + content.rotation))
+                    .position(x: (instance.x + instance.width / 2) * scale, y: (instance.y + instance.height / 2) * scale)
+            }
+        }
+    }
+
+    /// Only the fill area counts toward the mask — a shape's stroke ring
+    /// contributing its own separate coverage would need real compositing
+    /// beyond a single `.opacity()` scalar; filled-shape masks are what
+    /// Flash's own masking is built around anyway.
+    private func shapeStencil(_ shape: PlacedShape) -> some View {
+        let anyShape = anyShapePath(for: shape, scale: scale)
+        return anyShape
+            .fill(Color.black)
+            .frame(width: shape.width * scale, height: shape.height * scale)
+            .opacity(shape.opacity * shape.fillOpacity)
+            .position(x: (shape.x + shape.width / 2) * scale, y: (shape.y + shape.height / 2) * scale)
+    }
 }
 
 /// Ghosted nearby-frame content, Flash's own onion-skin convention — frames
@@ -192,6 +301,8 @@ private struct OnionSkinOverlay: View {
                                   let kf = layer.governingKeyframe(at: frame),
                                   let content = symbol.content(atLocalFrame: symbol.localFrame(atParentFrame: frame, governingKeyframe: kf)) {
                             ghost(instance, content: content, tint: offset < 0 ? .blue : .orange, spin: spinDegrees(layer: layer, at: frame))
+                        } else if let shape = layer.interpolatedPlacedShape(at: frame) {
+                            ghost(shape, tint: offset < 0 ? .blue : .orange)
                         }
                     }
                 }
@@ -247,6 +358,24 @@ private struct OnionSkinOverlay: View {
             .position(x: (p.x + p.width / 2) * scale, y: (p.y + p.height / 2) * scale)
     }
 
+    /// Same idea as the two `ghost` overloads above, for a shape —
+    /// flattened to one uniform tint for both fill and stroke (a ghost's
+    /// whole point is a flat silhouette, not a real color preview, same
+    /// reasoning as text/symbol ghosts). No spin parameter: a shape's
+    /// rotation isn't a tweenable property in v1 (only position/size/
+    /// stroke width/corner radius and color/opacity are — see
+    /// `TLLayer.interpolatedPlacedShape`), so there's no tween-rotation
+    /// bonus to reproduce the way there is for a text/symbol span.
+    private func ghost(_ shape: PlacedShape, tint: Color) -> some View {
+        let anyShape = anyShapePath(for: shape, scale: scale)
+        return anyShape
+            .fill(tint)
+            .overlay(anyShape.stroke(tint, style: shapeStrokeStyle(for: shape, scale: scale)))
+            .frame(width: shape.width * scale, height: shape.height * scale)
+            .opacity(0.35)
+            .position(x: (shape.x + shape.width / 2) * scale, y: (shape.y + shape.height / 2) * scale)
+    }
+
     /// Same "Rotate: CW/CCW, N times" tween bonus StagePlacedTextView's own
     /// `spinDegrees` computes, just re-derived for an arbitrary onion-skin
     /// `frame` instead of the live playhead.
@@ -273,6 +402,10 @@ private struct StagePlacedTextView: View {
     // instead of compounding translation into itself every tick.
     @State private var moveStart: PlacedText?
     @State private var resizeStart: PlacedText?
+    // Every *other* selected object's starting position, captured once at
+    // the start of a multi-select drag — see `moveGesture`'s own use of it
+    // and `TimelineDocument.moveOtherSelectedPlacements`'s doc comment.
+    @State private var multiDragOthersStart: [TimelineDocument.StagePlacementRef: CGPoint] = [:]
     // The live candidate placement during an active move/resize — kept
     // purely local and committed to `layer.textFrames`/`doc.selectedPlacement`
     // only in `onEnded`, not on every tick. Writing to those shared
@@ -326,7 +459,7 @@ private struct StagePlacedTextView: View {
             .scaleEffect(shown.scale)
             .rotationEffect(.degrees(shown.rotation + spinDegrees))
             .position(x: (shown.x + shown.width / 2) * scale, y: (shown.y + shown.height / 2) * scale)
-            .onTapGesture { doc.selectedPlacement = ref }
+            .onTapGesture { doc.handleStageClick(.text(ref)) }
             .gesture(moveGesture)
             // A stable hook for UI automation/accessibility tooling to find
             // this exact element — the SwiftUI/AppKit equivalent of a
@@ -352,6 +485,9 @@ private struct StagePlacedTextView: View {
                     doc.deleteSelectedPlacement()
                 }
                 Divider()
+                if doc.selectedPlacements.count >= 2 {
+                    Button("Group") { doc.groupSelection() }
+                }
                 Button("Convert to Symbol…") {
                     doc.selectedPlacement = ref
                     doc.convertSelectedTextToSymbol(name: placement.text)
@@ -370,11 +506,21 @@ private struct StagePlacedTextView: View {
             .onChanged { value in
                 guard doc.selectedTool == .selection else { return }
                 let start = moveStart ?? placement
-                if moveStart == nil { moveStart = start }
+                if moveStart == nil {
+                    moveStart = start
+                    if doc.selectedPlacements.count > 1 {
+                        multiDragOthersStart = Dictionary(uniqueKeysWithValues: doc.selectedPlacements
+                            .filter { $0 != .text(ref) }
+                            .compactMap { r in doc.positionOfPlacement(r).map { (r, $0) } })
+                    }
+                }
                 var p = start
                 p.x = start.x + value.translation.width / scale
                 p.y = start.y + value.translation.height / scale
                 liveDrag = p
+                if !multiDragOthersStart.isEmpty {
+                    doc.moveOtherSelectedPlacements(multiDragOthersStart, dx: value.translation.width / scale, dy: value.translation.height / scale)
+                }
             }
             .onEnded { _ in
                 if let liveDrag {
@@ -385,6 +531,7 @@ private struct StagePlacedTextView: View {
                 }
                 moveStart = nil
                 liveDrag = nil
+                multiDragOthersStart = [:]
             }
     }
 
@@ -418,10 +565,7 @@ private struct StagePlacedTextView: View {
 
 /// A placed Rectangle/Ellipse — same drag/resize mechanics as
 /// `StagePlacedTextView` (see that view's own doc comments for why local
-/// `@State` + `.global` coordinate space matter here). No `displayPlacement`
-/// interpolation: shapes aren't tweenable yet (see `PlacedShape`'s own doc
-/// comment), so this always just shows `placement` itself, live-drag
-/// override aside — there's no tween span to ease across.
+/// `@State` + `.global` coordinate space matter here).
 private struct StagePlacedShapeView: View {
     let doc: TimelineDocument
     let layer: TLLayer
@@ -431,28 +575,32 @@ private struct StagePlacedShapeView: View {
     @State private var moveStart: PlacedShape?
     @State private var resizeStart: PlacedShape?
     @State private var liveDrag: PlacedShape?
+    @State private var multiDragOthersStart: [TimelineDocument.StagePlacementRef: CGPoint] = [:]
 
     private var ref: TimelineDocument.ShapePlacementRef {
         TimelineDocument.ShapePlacementRef(layerID: layer.id, keyframe: keyframe)
     }
     private var placement: PlacedShape { layer.shapeFrames[keyframe] ?? PlacedShape(x: 0, y: 0) }
     private var isSelected: Bool { doc.selectedShapePlacement == ref }
-    private var displayPlacement: PlacedShape { liveDrag ?? placement }
 
-    private func shape(for kind: ShapeKind) -> AnyShape {
-        switch kind {
-        case .rectangle: return AnyShape(Rectangle())
-        case .ellipse: return AnyShape(Ellipse())
-        }
+    /// The rendered state at the current playhead — `placement` itself
+    /// outside a tween, or eased-interpolated toward the tween's end
+    /// keyframe while the playhead is inside that span. Same idiom as
+    /// `StagePlacedTextView.displayPlacement` — gestures (move/resize)
+    /// always read/write `placement`/`layer.shapeFrames[keyframe]`
+    /// directly, never this — you edit a tween's endpoints, not an
+    /// in-between frame.
+    private var displayPlacement: PlacedShape {
+        liveDrag ?? layer.interpolatedPlacedShape(at: doc.playhead) ?? placement
     }
 
     var body: some View {
         let shown = displayPlacement
-        let anyShape = shape(for: shown.kind)
+        let anyShape = anyShapePath(for: shown, scale: scale)
         anyShape
             .fill(Color(hex: shown.fillColorHex).opacity(shown.fillOpacity))
             .overlay(
-                anyShape.stroke(Color(hex: shown.strokeColorHex).opacity(shown.strokeOpacity), lineWidth: shown.strokeWidth * scale)
+                anyShape.stroke(Color(hex: shown.strokeColorHex).opacity(shown.strokeOpacity), style: shapeStrokeStyle(for: shown, scale: scale))
             )
             .frame(width: shown.width * scale, height: shown.height * scale)
             .opacity(shown.opacity)
@@ -463,7 +611,7 @@ private struct StagePlacedShapeView: View {
             .overlay(alignment: .bottomLeading) { if isSelected { resizeHandle(.bottomLeading) } }
             .overlay(alignment: .bottomTrailing) { if isSelected { resizeHandle(.bottomTrailing) } }
             .position(x: (shown.x + shown.width / 2) * scale, y: (shown.y + shown.height / 2) * scale)
-            .onTapGesture { doc.selectedShapePlacement = ref }
+            .onTapGesture { doc.handleStageClick(.shape(ref)) }
             .gesture(moveGesture)
             .accessibilityIdentifier("stage-placed-shape")
             .contextMenu {
@@ -480,6 +628,10 @@ private struct StagePlacedShapeView: View {
                     doc.selectedShapePlacement = ref
                     doc.deleteSelectedShapePlacement()
                 }
+                if doc.selectedPlacements.count >= 2 {
+                    Divider()
+                    Button("Group") { doc.groupSelection() }
+                }
             }
     }
 
@@ -488,11 +640,21 @@ private struct StagePlacedShapeView: View {
             .onChanged { value in
                 guard doc.selectedTool == .selection else { return }
                 let start = moveStart ?? placement
-                if moveStart == nil { moveStart = start }
+                if moveStart == nil {
+                    moveStart = start
+                    if doc.selectedPlacements.count > 1 {
+                        multiDragOthersStart = Dictionary(uniqueKeysWithValues: doc.selectedPlacements
+                            .filter { $0 != .shape(ref) }
+                            .compactMap { r in doc.positionOfPlacement(r).map { (r, $0) } })
+                    }
+                }
                 var p = start
                 p.x = start.x + value.translation.width / scale
                 p.y = start.y + value.translation.height / scale
                 liveDrag = p
+                if !multiDragOthersStart.isEmpty {
+                    doc.moveOtherSelectedPlacements(multiDragOthersStart, dx: value.translation.width / scale, dy: value.translation.height / scale)
+                }
             }
             .onEnded { _ in
                 if let liveDrag {
@@ -503,6 +665,7 @@ private struct StagePlacedShapeView: View {
                 }
                 moveStart = nil
                 liveDrag = nil
+                multiDragOthersStart = [:]
             }
     }
 
@@ -565,6 +728,224 @@ private struct StagePlacedShapeView: View {
     }
 }
 
+/// A grouped bundle of placements (see `PlacedGroup`'s own doc comment on
+/// why this is a genuinely separate concept from a Symbol) — moves and
+/// resizes as one unit; resizing proportionally rescales every child's
+/// own x/y/width/height (and a shape's strokeWidth) by the same ratio,
+/// mirroring Flash's own Group resize. No double-click-to-enter-and-edit-
+/// one-member mode in v1 — Ungroup, edit, re-group is the workaround for
+/// now (see PlacedGroup's own doc comment on why).
+private struct StagePlacedGroupView: View {
+    let doc: TimelineDocument
+    let layer: TLLayer
+    let keyframe: Int
+    var scale: CGFloat
+
+    @State private var moveStart: PlacedGroup?
+    @State private var resizeStart: PlacedGroup?
+    @State private var liveDrag: PlacedGroup?
+    @State private var multiDragOthersStart: [TimelineDocument.StagePlacementRef: CGPoint] = [:]
+
+    private var ref: TimelineDocument.GroupPlacementRef {
+        TimelineDocument.GroupPlacementRef(layerID: layer.id, keyframe: keyframe)
+    }
+    private var placement: PlacedGroup { layer.groupFrames[keyframe] ?? PlacedGroup(x: 0, y: 0, width: 1, height: 1) }
+    private var isSelected: Bool { doc.selectedGroupPlacement == ref }
+
+    /// Groups aren't tweenable in v1 (see `PlacedGroup`'s own doc comment)
+    /// — `interpolatedPlacedGroup` never eases, just resolves through a
+    /// mid-span frame to the governing keyframe's own value, same as
+    /// shapes did before shape tweening existed.
+    private var displayPlacement: PlacedGroup {
+        liveDrag ?? layer.interpolatedPlacedGroup(at: doc.playhead) ?? placement
+    }
+
+    var body: some View {
+        let shown = displayPlacement
+        ZStack(alignment: .topLeading) {
+            ForEach(Array(shown.shapes.enumerated()), id: \.offset) { _, child in staticShapeView(child) }
+            ForEach(Array(shown.texts.enumerated()), id: \.offset) { _, child in staticTextView(child) }
+            ForEach(Array(shown.symbols.enumerated()), id: \.offset) { _, child in staticSymbolView(child) }
+        }
+        .frame(width: shown.width * scale, height: shown.height * scale, alignment: .topLeading)
+        .contentShape(Rectangle())
+        .opacity(shown.opacity)
+        .rotationEffect(.degrees(shown.rotation))
+        .overlay(isSelected ? Rectangle().stroke(Color.accentColor, lineWidth: 1.5) : nil)
+        .overlay(alignment: .topLeading) { if isSelected { resizeHandle(.topLeading) } }
+        .overlay(alignment: .topTrailing) { if isSelected { resizeHandle(.topTrailing) } }
+        .overlay(alignment: .bottomLeading) { if isSelected { resizeHandle(.bottomLeading) } }
+        .overlay(alignment: .bottomTrailing) { if isSelected { resizeHandle(.bottomTrailing) } }
+        .position(x: (shown.x + shown.width / 2) * scale, y: (shown.y + shown.height / 2) * scale)
+        .onTapGesture { doc.handleStageClick(.group(ref)) }
+        .gesture(moveGesture)
+        .accessibilityIdentifier("stage-placed-group")
+        .contextMenu {
+            Button("Ungroup") {
+                doc.selectedGroupPlacement = ref
+                doc.ungroupSelection()
+            }
+            Divider()
+            Button("Delete", role: .destructive) { doc.deletePlacement(.group(ref)) }
+        }
+    }
+
+    // Non-interactive — individual members aren't selectable/editable
+    // while grouped in v1 (see this struct's own doc comment).
+    private func staticShapeView(_ shape: PlacedShape) -> some View {
+        let anyShape = anyShapePath(for: shape, scale: scale)
+        return anyShape
+            .fill(Color(hex: shape.fillColorHex).opacity(shape.fillOpacity))
+            .overlay(anyShape.stroke(Color(hex: shape.strokeColorHex).opacity(shape.strokeOpacity), style: shapeStrokeStyle(for: shape, scale: scale)))
+            .frame(width: shape.width * scale, height: shape.height * scale)
+            .opacity(shape.opacity)
+            .position(x: (shape.x + shape.width / 2) * scale, y: (shape.y + shape.height / 2) * scale)
+    }
+
+    private func staticTextView(_ text: PlacedText) -> some View {
+        Text(text.text)
+            .font(.custom(text.fontName, size: text.fontSize * scale))
+            .bold(text.bold)
+            .italic(text.italic)
+            .foregroundStyle(Color(hex: text.colorHex))
+            .multilineTextAlignment(text.alignment.swiftUIAlignment)
+            .frame(width: text.width * scale, height: text.height * scale, alignment: text.alignment.frameAlignment)
+            .placedTextFilters(text, scale: scale)
+            .opacity(text.opacity)
+            .scaleEffect(text.scale)
+            .rotationEffect(.degrees(text.rotation))
+            .position(x: (text.x + text.width / 2) * scale, y: (text.y + text.height / 2) * scale)
+    }
+
+    /// Still loops independently on its own internal clock even nested in
+    /// a group — same `localFrame`/`content(atLocalFrame:)` mechanism
+    /// every other placed symbol instance uses, keyed off this group's own
+    /// governing keyframe.
+    private func staticSymbolView(_ instance: SymbolInstance) -> some View {
+        Group {
+            if let symbol = doc.library.first(where: { $0.id == instance.symbolID }) {
+                let localFrame = symbol.localFrame(atParentFrame: doc.playhead, governingKeyframe: keyframe)
+                if let content = symbol.content(atLocalFrame: localFrame) {
+                    Text(content.text)
+                        .font(.custom(content.fontName, size: content.fontSize * scale))
+                        .bold(content.bold)
+                        .italic(content.italic)
+                        .foregroundStyle(Color(hex: content.colorHex))
+                        .frame(width: instance.width * scale, height: instance.height * scale, alignment: content.alignment.frameAlignment)
+                        .opacity(instance.opacity * content.opacity)
+                        .scaleEffect(instance.scale * content.scale)
+                        .rotationEffect(.degrees(instance.rotation + content.rotation))
+                        .position(x: (instance.x + instance.width / 2) * scale, y: (instance.y + instance.height / 2) * scale)
+                }
+            }
+        }
+    }
+
+    private var moveGesture: some Gesture {
+        DragGesture(minimumDistance: 1, coordinateSpace: .global)
+            .onChanged { value in
+                guard doc.selectedTool == .selection else { return }
+                let start = moveStart ?? placement
+                if moveStart == nil {
+                    moveStart = start
+                    if doc.selectedPlacements.count > 1 {
+                        multiDragOthersStart = Dictionary(uniqueKeysWithValues: doc.selectedPlacements
+                            .filter { $0 != .group(ref) }
+                            .compactMap { r in doc.positionOfPlacement(r).map { (r, $0) } })
+                    }
+                }
+                var p = start
+                p.x = start.x + value.translation.width / scale
+                p.y = start.y + value.translation.height / scale
+                liveDrag = p
+                if !multiDragOthersStart.isEmpty {
+                    doc.moveOtherSelectedPlacements(multiDragOthersStart, dx: value.translation.width / scale, dy: value.translation.height / scale)
+                }
+            }
+            .onEnded { _ in
+                if let liveDrag {
+                    doc.withUndoSnapshot(coalesce: ref.undoToken) {
+                        doc.selectedGroupPlacement = ref
+                        layer.groupFrames[keyframe] = liveDrag
+                    }
+                }
+                moveStart = nil
+                liveDrag = nil
+                multiDragOthersStart = [:]
+            }
+    }
+
+    private enum ResizeCorner {
+        case topLeading, topTrailing, bottomLeading, bottomTrailing
+
+        var fraction: (x: CGFloat, y: CGFloat) {
+            switch self {
+            case .topLeading: return (0, 0)
+            case .topTrailing: return (1, 0)
+            case .bottomLeading: return (0, 1)
+            case .bottomTrailing: return (1, 1)
+            }
+        }
+    }
+
+    /// Same corner-relative-to-fixed-opposite-corner math as
+    /// `StagePlacedShapeView.resized`, plus proportionally rescaling every
+    /// child by the ratio the group's own box just changed by.
+    private static func resized(_ start: PlacedGroup, corner: ResizeCorner, dx: CGFloat, dy: CGFloat) -> PlacedGroup {
+        let f = corner.fraction
+        let fixedX = start.x + (1 - f.x) * start.width
+        let fixedY = start.y + (1 - f.y) * start.height
+        let draggedX = start.x + f.x * start.width + dx
+        let draggedY = start.y + f.y * start.height + dy
+        var p = start
+        p.width = max(4, abs(draggedX - fixedX))
+        p.height = max(4, abs(draggedY - fixedY))
+        p.x = min(draggedX, fixedX)
+        p.y = min(draggedY, fixedY)
+
+        let scaleX = start.width > 0 ? p.width / start.width : 1
+        let scaleY = start.height > 0 ? p.height / start.height : 1
+        p.texts = start.texts.map { child in
+            var c = child
+            c.x *= scaleX; c.y *= scaleY; c.width *= scaleX; c.height *= scaleY
+            return c
+        }
+        p.shapes = start.shapes.map { child in
+            var c = child
+            c.x *= scaleX; c.y *= scaleY; c.width *= scaleX; c.height *= scaleY
+            c.strokeWidth *= min(scaleX, scaleY)
+            return c
+        }
+        p.symbols = start.symbols.map { child in
+            var c = child
+            c.x *= scaleX; c.y *= scaleY; c.width *= scaleX; c.height *= scaleY
+            return c
+        }
+        return p
+    }
+
+    private func resizeHandle(_ corner: ResizeCorner) -> some View {
+        Rectangle()
+            .fill(Color.accentColor)
+            .frame(width: 8, height: 8)
+            .gesture(
+                DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                    .onChanged { value in
+                        let start = resizeStart ?? placement
+                        if resizeStart == nil { resizeStart = start }
+                        liveDrag = Self.resized(start, corner: corner, dx: value.translation.width / scale, dy: value.translation.height / scale)
+                    }
+                    .onEnded { _ in
+                        if let liveDrag {
+                            doc.withUndoSnapshot(coalesce: ref.undoToken) { layer.groupFrames[keyframe] = liveDrag }
+                        }
+                        resizeStart = nil
+                        liveDrag = nil
+                    }
+            )
+    }
+}
+
 /// A placed instance of a Library symbol — same drag/resize mechanics as
 /// `StagePlacedTextView` (see that view's own doc comments for why local
 /// `@State` + `.global` coordinate space matter here), rendering whatever
@@ -579,6 +960,7 @@ private struct StageSymbolInstanceView: View {
     @State private var moveStart: SymbolInstance?
     @State private var resizeStart: SymbolInstance?
     @State private var liveDrag: SymbolInstance?
+    @State private var multiDragOthersStart: [TimelineDocument.StagePlacementRef: CGPoint] = [:]
 
     private var ref: TimelineDocument.SymbolPlacementRef {
         TimelineDocument.SymbolPlacementRef(layerID: layer.id, keyframe: keyframe)
@@ -655,10 +1037,7 @@ private struct StageSymbolInstanceView: View {
                 // enters edit-in-place instead of also firing the
                 // single-click selection handler first.
                 .onTapGesture(count: 2) { doc.enterSymbolEditing(symbol.id) }
-                .onTapGesture {
-                    doc.selectedSymbolPlacement = ref
-                    doc.selectedPlacement = nil
-                }
+                .onTapGesture { doc.handleStageClick(.symbol(ref)) }
                 .gesture(moveGesture)
                 .accessibilityIdentifier("stage-symbol-instance")
                 .contextMenu {
@@ -675,6 +1054,10 @@ private struct StageSymbolInstanceView: View {
                         doc.selectedSymbolPlacement = ref
                         doc.deleteSelectedSymbolPlacement()
                     }
+                    if doc.selectedPlacements.count >= 2 {
+                        Divider()
+                        Button("Group") { doc.groupSelection() }
+                    }
                 }
         }
     }
@@ -684,11 +1067,21 @@ private struct StageSymbolInstanceView: View {
             .onChanged { value in
                 guard doc.selectedTool == .selection, let placement else { return }
                 let start = moveStart ?? placement
-                if moveStart == nil { moveStart = start }
+                if moveStart == nil {
+                    moveStart = start
+                    if doc.selectedPlacements.count > 1 {
+                        multiDragOthersStart = Dictionary(uniqueKeysWithValues: doc.selectedPlacements
+                            .filter { $0 != .symbol(ref) }
+                            .compactMap { r in doc.positionOfPlacement(r).map { (r, $0) } })
+                    }
+                }
                 var p = start
                 p.x = start.x + value.translation.width / scale
                 p.y = start.y + value.translation.height / scale
                 liveDrag = p
+                if !multiDragOthersStart.isEmpty {
+                    doc.moveOtherSelectedPlacements(multiDragOthersStart, dx: value.translation.width / scale, dy: value.translation.height / scale)
+                }
             }
             .onEnded { _ in
                 if let liveDrag {
@@ -700,6 +1093,7 @@ private struct StageSymbolInstanceView: View {
                 }
                 moveStart = nil
                 liveDrag = nil
+                multiDragOthersStart = [:]
             }
     }
 
@@ -1250,12 +1644,14 @@ struct StageView: View {
             }
         }
 
-        guard doc.selectedPlacement != nil || doc.selectedSymbolPlacement != nil || doc.selectedShapePlacement != nil else { return false }
+        guard !doc.selectedPlacements.isEmpty else { return false }
 
         if event.keyCode == 51 || event.keyCode == 117 { // Delete (backspace) / Forward Delete
-            if doc.selectedPlacement != nil { doc.deleteSelectedPlacement() }
-            if doc.selectedSymbolPlacement != nil { doc.deleteSelectedSymbolPlacement() }
-            if doc.selectedShapePlacement != nil { doc.deleteSelectedShapePlacement() }
+            // The generic form (doc.deletePlacement) covers every selected
+            // object at once, including the ordinary single-selection case
+            // (selectedPlacements always has exactly the primary ref then)
+            // — no need for the old three-way per-kind dispatch anymore.
+            for ref in doc.selectedPlacements { doc.deletePlacement(ref) }
             return true
         }
 
@@ -1268,9 +1664,7 @@ struct StageView: View {
         case 124: (dx, dy) = (step, 0)  // right
         default: return false
         }
-        if doc.selectedPlacement != nil { doc.nudgeSelectedPlacement(dx: dx, dy: dy) }
-        if doc.selectedSymbolPlacement != nil { doc.nudgeSelectedSymbolPlacement(dx: dx, dy: dy) }
-        if doc.selectedShapePlacement != nil { doc.nudgeSelectedShapePlacement(dx: dx, dy: dy) }
+        for ref in doc.selectedPlacements { doc.nudgePlacement(ref, dx: dx, dy: dy) }
         return true
     }
 }
